@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Drop Map</title>
+<style>
+  :root { color-scheme: dark; --bg:#14151a; --panel:#1d1f27; --line:#2d303b; --text:#eceef4; --muted:#9aa0b2; --accent:#7b4dff; --red:#dc0000; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; padding-bottom:150px; }
+  header { display:flex; flex-wrap:wrap; gap:6px 16px; align-items:baseline; justify-content:space-between; padding:14px 16px 8px; max-width:1100px; margin:0 auto; }
+  h1 { font-size:18px; margin:0; }
+  #meta { color:var(--muted); font-size:13px; }
+  #banner { max-width:1100px; margin:4px auto 8px; padding:10px 14px; border-radius:10px; background:#3a2a12; color:#ffd8a0; font-size:14px; }
+  #banner[hidden] { display:none; }
+  .legend { display:flex; flex-wrap:wrap; gap:8px 16px; max-width:1100px; margin:0 auto; padding:0 16px 8px; color:var(--muted); font-size:13px; }
+  .legend i { display:inline-block; width:14px; height:14px; border-radius:3px; vertical-align:-2px; margin-right:6px; border:1px solid #fff4; }
+  .wrap { max-width:1100px; margin:0 auto; padding:0 8px; }
+  svg { display:block; width:100%; height:auto; border-radius:12px; background:#0d0e12; touch-action:manipulation; }
+  .r { fill:transparent; stroke:transparent; stroke-width:5; stroke-linejoin:round; cursor:pointer; transition:fill .15s; }
+  .r:hover { fill:rgba(255,255,255,.18); }
+  .r.claimed { fill:rgba(0,0,0,.76); stroke:#000; }
+  .r.contested { fill:rgba(220,0,0,.64); stroke:#ff2d2d; }
+  .r.mine { stroke:#fff; stroke-width:7; stroke-dasharray:22 12; }
+  .r.selected { stroke:#ffd43b; stroke-width:8; stroke-dasharray:none; }
+  #bar { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:1px solid var(--line); padding:12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  #bar .in { max-width:1100px; margin:0 auto; display:flex; flex-wrap:wrap; gap:10px 16px; align-items:center; justify-content:space-between; }
+  #info b { font-size:16px; }
+  #sub { color:var(--muted); font-size:13px; min-height:1.3em; }
+  #msg { font-size:13px; color:#b6f0c0; min-height:1.3em; }
+  #msg.err { color:#ff9c9c; }
+  .btns { display:flex; gap:8px; }
+  button { font:inherit; font-weight:600; border:0; border-radius:10px; padding:10px 16px; cursor:pointer; color:#fff; background:var(--accent); }
+  button.alt { background:#3a3d4a; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Drop Map</h1>
+  <div id="meta"></div>
+</header>
+<div id="banner" hidden></div>
+<div class="legend">
+  <span><i style="background:#0d0e12"></i>Claimed</span>
+  <span><i style="background:var(--red)"></i>Contested</span>
+  <span><i style="background:transparent;border:2px dashed #fff"></i>Your team's spot</span>
+  <span>Tap a spot, then press <b>Drop here</b></span>
+</div>
+<div class="wrap"><svg id="map" role="img" aria-label="Fortnite drop map"></svg></div>
+
+<div id="bar"><div class="in">
+  <div>
+    <div id="info"><b id="sel">Pick a spot on the map</b></div>
+    <div id="sub"></div>
+    <div id="msg"></div>
+  </div>
+  <div class="btns">
+    <button id="claim" disabled>Drop here</button>
+    <button id="release" class="alt" disabled>Release my spot</button>
+  </div>
+</div></div>
+
+<script>
+(() => {
+  const gid = location.pathname.split('/').pop();
+  const NS = 'http://www.w3.org/2000/svg';
+  const $ = (id) => document.getElementById(id);
+  let cfg = null, state = null, selected = null, busy = false;
+
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    if (r.status === 401) { location.href = '/login?next=' + encodeURIComponent(location.pathname); throw new Error('login'); }
+    return r;
+  }
+
+  function buildMap() {
+    const svg = $('map');
+    svg.setAttribute('viewBox', '0 0 ' + cfg.map.width + ' ' + cfg.map.height);
+    const img = document.createElementNS(NS, 'image');
+    img.setAttribute('href', '/static/map.jpg');
+    img.setAttribute('width', cfg.map.width);
+    img.setAttribute('height', cfg.map.height);
+    svg.appendChild(img);
+    for (const r of cfg.regions) {
+      const p = document.createElementNS(NS, 'path');
+      p.setAttribute('d', r.polygons.map((poly) => 'M' + poly.map((pt) => pt[0] + ' ' + pt[1]).join(' L ') + ' Z').join(' '));
+      p.setAttribute('class', 'r');
+      p.dataset.id = r.id;
+      p.addEventListener('click', () => { selected = r.id; paint(); });
+      svg.appendChild(p);
+    }
+  }
+
+  const regionOf = (id) => state && state.regions.find((r) => r.id === id);
+
+  function describe(r) {
+    if (!r) return '';
+    if (r.state === 'free') return 'Nobody has picked this spot yet.';
+    if (r.state === 'claimed') return 'Taken by ' + r.teams[0] + (r.mine ? ' (your team)' : '');
+    return 'Contested: ' + r.teams.join(' vs ') + (r.mine ? ' (your team is in)' : '');
+  }
+
+  function paint() {
+    if (!state) return;
+    document.querySelectorAll('.r').forEach((el) => {
+      const r = regionOf(el.dataset.id);
+      el.setAttribute('class', 'r ' + (r ? r.state : '') + (r && r.mine ? ' mine' : '') + (el.dataset.id === selected ? ' selected' : ''));
+    });
+    $('title').textContent = state.guildName + ' · Drop Map';
+
+    const banner = $('banner');
+    let note = '';
+    if (!state.open) note = 'The drop map is locked right now.';
+    else if (state.status === 'not_registered') note = 'You are not registered yet. Register in the Discord register channel, then reload this page.';
+    else if (state.status === 'not_in_game') note = 'Register for the current game in Discord to take part, then reload.';
+    else if (state.status === 'no_team') note = 'You are not on a team yet. Use /team set in Discord or the fill channel.';
+    banner.hidden = !note;
+    banner.textContent = note;
+
+    const sel = regionOf(selected);
+    $('sel').textContent = sel ? sel.name : 'Pick a spot on the map';
+    const mineRegion = state.regions.find((r) => r.mine);
+    const teamTxt = state.team ? 'Team ' + state.team.name + (mineRegion ? ' · dropping at ' + mineRegion.name : ' · no spot yet') : '';
+    $('sub').textContent = sel ? describe(sel) + (teamTxt ? '  —  ' + teamTxt : '') : teamTxt;
+
+    const can = state.open && state.status === 'ok' && !busy;
+    $('claim').disabled = !(can && sel && !sel.mine);
+    $('release').disabled = !(can && mineRegion);
+    tick();
+  }
+
+  function tick() {
+    if (!state) return;
+    let t = '';
+    if (state.game) {
+      const left = Math.max(0, state.game.nextAt - Date.now());
+      const m = Math.floor(left / 60000), s = Math.floor((left % 60000) / 1000);
+      t = 'Game ' + state.game.current + ' of ' + state.game.total + ' · ' +
+        (state.game.current < state.game.total ? 'next registration in ' : 'session ends in ') +
+        m + ':' + String(s).padStart(2, '0');
+    }
+    $('meta').textContent = t;
+  }
+
+  function say(text, isErr) {
+    const el = $('msg');
+    el.textContent = text || '';
+    el.className = isErr ? 'err' : '';
+  }
+
+  async function refresh() {
+    try {
+      const r = await api('/api/g/' + gid + '/state');
+      const d = await r.json();
+      if (!r.ok) { say(d.error || 'Could not load the map.', true); return; }
+      state = d.state;
+      paint();
+    } catch (e) { /* offline or redirecting to login */ }
+  }
+
+  async function act(kind) {
+    busy = true; paint(); say('');
+    try {
+      const r = await api('/api/g/' + gid + '/' + kind, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ regionId: selected }),
+      });
+      const d = await r.json();
+      if (d.state) state = d.state;
+      say(d.message || d.error || '', !r.ok);
+    } catch (e) { say('Something went wrong. Try again.', true); }
+    busy = false; paint();
+  }
+
+  $('claim').addEventListener('click', () => act('claim'));
+  $('release').addEventListener('click', () => act('release'));
+
+  (async () => {
+    cfg = await (await fetch('/static/regions.json')).json();
+    buildMap();
+    await refresh();
+    setInterval(() => { if (!busy && !document.hidden) refresh(); }, 3000);
+    setInterval(tick, 1000);
+  })();
+})();
+</script>
+</body>
+</html>

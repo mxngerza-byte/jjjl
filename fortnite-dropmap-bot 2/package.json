@@ -1,0 +1,14 @@
+{
+  "name": "fortnite-dropmap-bot",
+  "version": "2.0.0",
+  "description": "Discord bot: registration, team-based interactive drop map, trio fill finder and timed multi-game hosting for Fortnite scrims",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/logic.test.js test/web.test.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  }
+}
