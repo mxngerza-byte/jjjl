@@ -142,3 +142,94 @@ test('every region in regions.json has valid polygons and a unique id', () => {
   }
   assert.equal(cfg.regions.length, 27);
 });
+
+/* ---------------- event modes: solos / duos / trios / squads ---------------- */
+const mkMode = (mode, n = 6) => {
+  const g = L.ensureGuild({});
+  if (mode) g.mode = mode;
+  for (const id of ['a', 'b', 'c', 'd', 'e', 'f'].slice(0, n)) g.players[id] = { epic: id.toUpperCase(), platform: 'PC', region: 'EU', team: null };
+  return g;
+};
+
+test('modes: default is trios and sizes are 1/2/3/4', () => {
+  assert.equal(L.teamSize(L.ensureGuild({})), 3);
+  assert.equal(L.teamSize(L.ensureGuild({ mode: 'bogus' })), 3);          // unknown value falls back to trios
+  assert.deepEqual(['solos', 'duos', 'trios', 'squads'].map((m) => L.MODES[m].size), [1, 2, 3, 4]);
+  const old = { roleId: 'r', players: {} };                               // a database from before modes existed
+  assert.equal(L.ensureGuild(old).mode, 'trios');
+});
+
+test('modes: team cap follows the mode (duos 2, squads 4)', () => {
+  const d = mkMode('duos');
+  assert.ok(L.setTeam(d, 'a', 'T').ok); assert.ok(L.setTeam(d, 'b', 'T').ok);
+  const r = L.setTeam(d, 'c', 'T');
+  assert.equal(r.ok, false); assert.match(r.error, /2 players/);
+  const s = mkMode('squads');
+  for (const id of ['a', 'b', 'c', 'd']) assert.ok(L.setTeam(s, id, 'Sq').ok);
+  assert.equal(L.setTeam(s, 'e', 'Sq').ok, false);
+  assert.equal(s.teams.sq.members.length, 4);
+});
+
+test('modes: solos gives every player their own uniquely named team', () => {
+  const g = mkMode('solos', 3);
+  g.players.b.epic = 'A';                                                  // same Epic name as player a
+  const a = L.soloTeam(g, 'a'); const b = L.soloTeam(g, 'b'); const c = L.soloTeam(g, 'c');
+  assert.deepEqual([a.team.name, b.team.name, c.team.name], ['A', 'A 2', 'C']);
+  assert.equal(L.setTeam(g, 'c', 'A').ok, false, 'a solo team cannot take a second player');
+  assert.equal(L.soloTeam(g, 'a').unchanged, true, 'calling again keeps the existing team');
+  g.players.a.epic = '@@@'; L.leaveTeam(g, 'a');
+  assert.equal(L.soloTeam(g, 'a').team.name, 'Player', 'epic name with no usable characters falls back');
+  assert.equal(L.soloTeam(g, 'nobody').ok, false);
+});
+
+test('modes: solo players can claim, and two solos on one spot are contested', () => {
+  const g = mkMode('solos', 2); g.roleId = 'r';
+  L.soloTeam(g, 'a'); L.soloTeam(g, 'b');
+  assert.equal(L.claim(g, L.teamOf(g, 'a').key, 'lifty-lodge').status, 'claimed');
+  assert.equal(L.claim(g, L.teamOf(g, 'b').key, 'lifty-lodge').status, 'contested');
+});
+
+test('modes: setMode clears teams, claims and fills but keeps registrations', () => {
+  const g = mkMode('trios', 4);
+  L.setTeam(g, 'a', 'One'); L.setTeam(g, 'b', 'One'); L.claim(g, 'one', 'lifty-lodge'); g.fills.m1 = { hostId: 'a' };
+  const r = L.setMode(g, 'duos');
+  assert.ok(r.ok); assert.equal(r.players, 4); assert.equal(g.mode, 'duos');
+  assert.deepEqual(g.teams, {}); assert.deepEqual(g.claims, {}); assert.deepEqual(g.fills, {});
+  assert.equal(Object.keys(g.players).length, 4);
+  assert.ok(Object.values(g.players).every((p) => p.team === null));
+  const s = L.setMode(g, 'solos');
+  assert.equal(Object.keys(g.teams).length, 4, 'switching to solos teams everyone up automatically');
+  assert.ok(Object.keys(g.players).every((id) => L.teamOf(g, id)?.members.length === 1));
+  assert.equal(L.setMode(g, 'nope').ok, false); assert.equal(g.mode, 'solos');
+});
+
+test('modes: fill works for duos and squads, is refused in solos', () => {
+  const d = mkMode('duos');
+  const { fill } = L.createFill(d, 'a');
+  assert.equal(fill.size, 2);
+  assert.equal(L.joinFill(d, fill, 'b').full, true);
+  assert.equal(L.joinFill(d, fill, 'c').ok, false);
+  assert.equal(L.finalizeFill(d, fill), "A's Duo");
+  assert.equal(d.teams["a's duo"].members.length, 2);
+
+  const q = mkMode('squads');
+  const f2 = L.createFill(q, 'a').fill;
+  assert.equal(f2.size, 4);
+  assert.equal(L.joinFill(q, f2, 'b').full, false); assert.equal(L.joinFill(q, f2, 'c').full, false);
+  assert.equal(L.joinFill(q, f2, 'd').full, true);
+  assert.equal(L.finalizeFill(q, f2), "A's Squad");
+
+  const s = mkMode('solos');
+  const r = L.createFill(s, 'a');
+  assert.equal(r.ok, false); assert.match(r.error, /solos/);
+});
+
+test('modes: a squad team with 3 players can still ask for one more; a full one cannot host', () => {
+  const g = mkMode('squads');
+  for (const id of ['a', 'b', 'c']) L.setTeam(g, id, 'Three');
+  const { fill } = L.createFill(g, 'a');
+  assert.deepEqual(fill.base, ['a', 'b', 'c']);
+  assert.equal(L.joinFill(g, fill, 'd').full, true);
+  const full = mkMode('duos'); L.setTeam(full, 'a', 'F'); L.setTeam(full, 'b', 'F');
+  assert.equal(L.createFill(full, 'a').ok, false);
+});

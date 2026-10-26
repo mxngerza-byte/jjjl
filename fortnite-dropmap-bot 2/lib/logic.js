@@ -3,7 +3,15 @@
  * Pure game logic: teams, drop claims, fill squads, hosted sessions.
  * No Discord code in here so it can be unit-tested (see test/logic.test.js).
  */
-const MAX_TEAM = 3;               // trios
+const MAX_TEAM = 3;               // default team size (trios); the real size comes from the host's mode
+const MODES = {                   // what the host can run; `size` = players per team
+  solos: { size: 1, one: 'Solo', label: 'Solos' },
+  duos: { size: 2, one: 'Duo', label: 'Duos' },
+  trios: { size: 3, one: 'Trio', label: 'Trios' },
+  squads: { size: 4, one: 'Squad', label: 'Squads' },
+};
+const modeOf = (g) => MODES[g.mode] || MODES.trios;
+const teamSize = (g) => modeOf(g).size;
 const MAX_GAMES = 6;
 const GAME_MS = 30 * 60 * 1000;   // 30 minutes between games
 
@@ -13,6 +21,7 @@ function defaults() {
     channels: { register: null, drop: null, fill: null },
     panels: { register: null, drop: null, fill: null },
     open: { registration: true, fill: true, dropmap: true },
+    mode: 'trios', // 'solos' | 'duos' | 'trios' | 'squads' -> players per team (1-4)
     players: {},   // userId -> { epic, platform, region, team: teamKey|null }
     teams: {},     // teamKey -> { name, members: [userId] }
     claims: {},    // regionId -> [teamKey]  (1 team = claimed/black, 2+ = contested/red)
@@ -66,14 +75,39 @@ function setTeam(g, userId, rawName) {
   const key = teamKey(name);
   if (p.team === key) return { ok: true, team: { key, ...g.teams[key] }, unchanged: true };
   const existing = g.teams[key];
-  if (existing && existing.members.length >= MAX_TEAM) {
-    return { ok: false, error: `Team **${existing.name}** already has ${MAX_TEAM} players.` };
+  if (existing && existing.members.length >= teamSize(g)) {
+    return { ok: false, error: `Team **${existing.name}** already has ${teamSize(g)} player${teamSize(g) === 1 ? '' : 's'}.` };
   }
   leaveTeam(g, userId);
   g.teams[key] ||= { name, members: [] };
   g.teams[key].members.push(userId);
   p.team = key;
   return { ok: true, team: { key, ...g.teams[key] } };
+}
+
+/** Solos: every player is their own team, named after their Epic name (made unique if needed). */
+function soloTeam(g, userId) {
+  const p = g.players[userId];
+  if (!p) return { ok: false, error: 'Register first.' };
+  const existing = teamOf(g, userId);
+  if (existing) return { ok: true, team: existing, unchanged: true };
+  const base = cleanTeamName(p.epic) || 'Player';
+  let name = base;
+  for (let n = 2; g.teams[teamKey(name)]; n++) name = cleanTeamName(`${base.slice(0, 21)} ${n}`);
+  return setTeam(g, userId, name);
+}
+
+/**
+ * Switch the event format. Team sizes change, so teams, claims and fill requests are cleared;
+ * registered players stay registered. In solos every registered player gets their own team.
+ */
+function setMode(g, mode) {
+  if (!MODES[mode]) return { ok: false, error: 'Choose solos, duos, trios or squads.' };
+  g.mode = mode;
+  g.teams = {}; g.claims = {}; g.fills = {};
+  for (const p of Object.values(g.players)) p.team = null;
+  if (MODES[mode].size === 1) for (const id of Object.keys(g.players)) soloTeam(g, id);
+  return { ok: true, mode: MODES[mode], players: Object.keys(g.players).length };
 }
 
 /* ------------------------------ claims ----------------------------- */
@@ -136,27 +170,30 @@ const regionState = (g, regionId) => {
 };
 const resetClaims = (g) => { g.claims = {}; };
 
-/* ------------------------------ fill (trios) ----------------------- */
+/* ------------------------------ fill (teams of 2-4) ---------------- */
 /** Open a request. If the host already has teammates they are the "base" of the squad. */
 function createFill(g, hostId, notes = '') {
+  const size = teamSize(g);
+  if (size === 1) return { ok: false, error: 'This event is solos. Everyone plays on their own, so there is nothing to fill.' };
   if (Object.values(g.fills).some((f) => f.hostId === hostId)) {
     return { ok: false, error: 'You already have an open fill request. Close it first.' };
   }
   const team = teamOf(g, hostId);
-  if (team && team.members.length >= MAX_TEAM) {
-    return { ok: false, error: 'Your team is already full (3/3).' };
+  if (team && team.members.length >= size) {
+    return { ok: false, error: `Your team is already full (${size}/${size}).` };
   }
   const base = team ? [...team.members] : [hostId];
-  return { ok: true, fill: { hostId, base, members: [...base], notes: String(notes || '').slice(0, 300), closed: false, teamName: null } };
+  return { ok: true, fill: { hostId, size, base, members: [...base], notes: String(notes || '').slice(0, 300), closed: false, teamName: null } };
 }
 
 function joinFill(g, fill, userId) {
   if (fill.closed) return { ok: false, error: 'This request is closed.' };
   if (fill.members.includes(userId)) return { ok: false, error: 'You\'re already in this squad.' };
-  if (fill.members.length >= MAX_TEAM) return { ok: false, error: 'This squad is full.' };
+  const size = fill.size || teamSize(g);
+  if (fill.members.length >= size) return { ok: false, error: 'This squad is full.' };
   if (teamOf(g, userId)) return { ok: false, error: 'You\'re already on a team. Use `/team leave` first.' };
   fill.members.push(userId);
-  return { ok: true, full: fill.members.length >= MAX_TEAM };
+  return { ok: true, full: fill.members.length >= size };
 }
 
 function leaveFill(fill, userId) {
@@ -173,7 +210,7 @@ function finalizeFill(g, fill) {
   if (host) {
     name = host.name;
   } else {
-    const base = cleanTeamName(`${g.players[fill.hostId]?.epic || 'Squad'}'s Trio`);
+    const base = cleanTeamName(`${g.players[fill.hostId]?.epic || 'Squad'}'s ${modeOf(g).one}`);
     name = base;
     for (let n = 2; g.teams[teamKey(name)]; n++) name = cleanTeamName(`${base.slice(0, 21)} ${n}`);
   }
@@ -217,7 +254,7 @@ const addToRoster = (g, userId) => {
 };
 
 module.exports = {
-  MAX_TEAM, MAX_GAMES, GAME_MS,
+  MAX_TEAM, MAX_GAMES, GAME_MS, MODES, modeOf, teamSize, soloTeam, setMode,
   defaults, ensureGuild,
   cleanTeamName, teamKey, teamOf, setTeam, leaveTeam, deleteTeam,
   unclaim, claim, regionState, resetClaims, actorStatus, claimFor, releaseFor,

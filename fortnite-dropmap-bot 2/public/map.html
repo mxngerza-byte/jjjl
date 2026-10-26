@@ -263,7 +263,7 @@
         (state.game.current < state.game.total ? 'next registration in ' : 'session ends in ') +
         m + ':' + String(s).padStart(2, '0');
     }
-    $('meta').textContent = t;
+    $('meta').textContent = [state.mode, t].filter(Boolean).join(' · ');
   }
 
   function say(text, isErr) {

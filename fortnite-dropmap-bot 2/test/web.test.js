@@ -254,3 +254,13 @@ test('avatars: claim and release responses still return a full state with claima
     assert.deepEqual(regionOf(rel.state, ids[3]).claimants, []);
   });
 });
+
+test('web: state includes the event mode label', async () => {
+  const { g, web } = setup();
+  await withServer(web, async (base) => {
+    const get = async () => (await (await fetch(`${base}/api/g/${GID}/state`, { headers: { Cookie: cookie(web, 'u1') } })).json()).state.mode;
+    assert.equal(await get(), 'Trios');
+    g.mode = 'solos';
+    assert.equal(await get(), 'Solos');
+  });
+});
