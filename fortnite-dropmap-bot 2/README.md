@@ -8,7 +8,7 @@ Registration → role → **interactive web drop map** (every box on your map is
 - **Drop map**: `/open dropmap` posts a **link** to the interactive map in `#drop-map`. Players open it, log in with Discord, tap a box, press **Drop here**.
   - A team picks a box → it turns **black** (claimed).
   - Another team picks the same box → it turns **red** (contested). If a team leaves, it goes back to black / unclaimed.
-  - A team holds one box at a time; picking a new one moves them. Everyone's page updates live (every 3 seconds) and the Discord panel updates too.
+  - A team holds one box at a time; picking a new one moves them. Everyone's page updates live (every 3 seconds). The Discord drop-map channel holds just the link message, with no embed.
   - All 27 boxes are clickable. No names were added to your map: the 13 boxes that already have a printed name keep it, the other 14 are just **Box 1 … Box 14** (plain numbers, only used in Discord text and the selection bar).
 - **Fill** (`#fill`): "Post a fill request" → others join with a button. When the trio is full the bot puts all three on one team and opens a thread. Duos can post too and only need one more.
 - **Hosted games** (`/host start games:N`, 1–6): game 1 starts right away with a registration post, `@here` and the map link. Every **30 minutes** the bot resets the map and roster, closes old fill requests, and posts a **new registration + `@here`** plus a fresh map link. After the last game it closes everything.
