@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {
   Client, GatewayIntentBits, PermissionFlagsBits, ChannelType, EmbedBuilder,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
   ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder,
   MessageFlags, Events,
 } = require('discord.js');
@@ -50,7 +50,6 @@ function save() {
 const G = (guildId) => L.ensureGuild((db.guilds[guildId] ||= {}));
 
 const teamName = (g, key) => g.teams[key]?.name || key;
-const chunk = (arr, n) => Array.from({ length: Math.ceil(arr.length / n) }, (_, i) => arr.slice(i * n, i * n + n));
 
 /* ------------------------------------------------------------------ */
 /*  Panels                                                            */
@@ -97,46 +96,18 @@ const linkRow = (guildId) => new ActionRowBuilder().addComponents(
   new ButtonBuilder().setLabel('Open the interactive map').setStyle(ButtonStyle.Link).setURL(mapUrl(guildId)),
 );
 
-function dropPanel(g, guildId) {
-  const lines = [];
-  let claimed = 0; let contested = 0;
-  for (const r of regions) {
-    const teams = g.claims[r.id] || [];
-    if (!teams.length) continue;
-    if (teams.length > 1) { contested++; lines.push(`🟥 **${r.name}** — ${teams.map((k) => teamName(g, k)).join(' vs ')}`); }
-    else { claimed++; lines.push(`⬛ **${r.name}** — ${teamName(g, teams[0])}`); }
-  }
-  const s = g.session;
-  const embed = new EmbedBuilder()
-    .setColor(g.open.dropmap ? 0x7b4dff : 0x808080)
-    .setTitle(`🗺️ Drop Map${s ? ` — Game ${s.current} of ${s.total}` : ''}${g.open.dropmap ? '' : ' 🔒'}`)
-    .setDescription(
-      ((g.open.dropmap
-        ? `**[Open the interactive map](${mapUrl(guildId)})** and tap your spot (log in with Discord). Or use the menu below.\n` +
-          '⬛ claimed · 🟥 contested (another team picked the same spot)\n\n'
-        : '🔒 **The drop map is locked.**\n\n') +
-        (lines.join('\n') || '*Nothing claimed yet.*')).slice(0, 4000),
-    )
-    .setFooter({ text: `${claimed} claimed • ${contested} contested • ${regions.length - claimed - contested} free` });
-
-  const menus = chunk(regions, 14).map((group, idx, all) =>
-    new ActionRowBuilder().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`drop:select:${idx}`)
-        .setPlaceholder(`Choose your drop spot${all.length > 1 ? ` (${idx + 1}/${all.length})` : ''}…`)
-        .setDisabled(!g.open.dropmap)
-        .addOptions(group.map((r) => {
-          const t = g.claims[r.id] || [];
-          const desc = !t.length ? 'Free' : t.length === 1 ? `Taken by ${teamName(g, t[0])}` : `Contested by ${t.length} teams`;
-          return { label: r.name.slice(0, 100), value: r.id, description: desc.slice(0, 100) };
-        })),
-    ),
-  );
-  const buttons = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('drop:clear').setLabel('Release my team\'s spot').setStyle(ButtonStyle.Secondary).setDisabled(!g.open.dropmap),
-    new ButtonBuilder().setLabel('Open the interactive map').setStyle(ButtonStyle.Link).setURL(mapUrl(guildId)),
-  );
-  return { embeds: [embed], components: [...menus, buttons] };
+/** The drop-map channel holds ONE message: the link to the interactive map (no embed, no menus). */
+function dropPanel(g, guildId, text) {
+  const sess = g.session;
+  const title = g.open.dropmap
+    ? `🗺️ **Drop map${sess ? ` — Game ${sess.current} of ${sess.total}` : ''}**`
+    : '🔒 **The drop map is locked.**';
+  return {
+    content: `${text || title}\n${mapUrl(guildId)}`,
+    embeds: [],                      // also clears the old embed if this edits an earlier panel
+    components: [linkRow(guildId)],
+    allowedMentions: { parse: [] },
+  };
 }
 
 /** Edit the stored panel message in place, or (re)post it. */
@@ -163,26 +134,13 @@ const refreshRegister = (guild, opts) => upsertPanel(guild, 'register', register
 const refreshFill = (guild, opts) => upsertPanel(guild, 'fill', fillPanel(G(guild.id)), opts);
 const refreshDrop = (guild, opts) => upsertPanel(guild, 'drop', dropPanel(G(guild.id), guild.id), opts);
 
-// Web claims arrive in bursts; refresh the Discord panel at most every ~1.5s.
-const dropTimers = new Map();
-function scheduleDropRefresh(guild) {
-  if (dropTimers.has(guild.id)) return;
-  dropTimers.set(guild.id, setTimeout(() => {
-    dropTimers.delete(guild.id);
-    refreshDrop(guild).catch(console.error);
-  }, 1500));
-}
+// Claims are only shown on the web map now, so a claim needs no Discord refresh.
+// (Kept as a no-op because the web server and team commands still call it.)
+function scheduleDropRefresh() {}
 
-/** Posts the map link in the drop-map channel. */
+/** (Re)posts the link message in the drop-map channel, replacing the previous one. */
 async function postDropLink(guild, text) {
-  const g = G(guild.id);
-  const ch = g.channels.drop && guild.channels.cache.get(g.channels.drop);
-  if (!ch) return;
-  await ch.send({
-    content: `${text}\n${mapUrl(guild.id)}`,
-    components: [linkRow(guild.id)],
-    allowedMentions: { parse: [] },
-  });
+  await upsertPanel(guild, 'drop', dropPanel(G(guild.id), guild.id, text), { repost: true });
 }
 
 /* ------------------------------------------------------------------ */
@@ -240,8 +198,8 @@ async function setOpen(guild, key, value) {
   save();
   if (key === 'registration') await refreshRegister(guild);
   if (key === 'dropmap') {
-    await refreshDrop(guild);
     if (value) await postDropLink(guild, '🗺️ **The drop map is open!** Tap your team\'s spot:');
+    else await refreshDrop(guild);
   }
   if (key === 'fill') {
     if (!value) await closeAllFills(guild);
@@ -296,7 +254,6 @@ async function advanceGame(client, guildId) {
       guild,
       `@here **Game ${res.current} of ${res.total}** — registration is open! The drop map has been reset. Next game <t:${Math.floor(res.nextAt / 1000)}:R>.`,
     );
-    await refreshDrop(guild);
     await refreshFill(guild);
     await postDropLink(guild, `🗺️ **Game ${res.current} map is ready.** Register, then tap your team's spot:`);
     scheduleSession(client, guildId);
@@ -446,7 +403,6 @@ async function handleHost(i, client) {
       i.guild,
       `@here **Game 1 of ${s.total}** — registration is open! Each game runs 30 minutes; a fresh registration goes out when it's over.`,
     );
-    await refreshDrop(i.guild);
     await refreshFill(i.guild);
     await postDropLink(i.guild, '🗺️ **Game 1 map is ready.** Register, then tap your team\'s spot:');
     scheduleSession(client, i.guild.id);
