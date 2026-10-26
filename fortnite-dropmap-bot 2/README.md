@@ -24,6 +24,7 @@ Registration → role → **interactive web drop map** (every box on your map is
 | `/host start games:<1-6>` | admin | Start a session, 30 min per game |
 | `/host status` · `/host stop` | admin | Check time to next game / end the session early |
 | `/dropmap link` · `reset` · `refresh` | admin | Re-post the link / clear all claims / re-post the panel |
+| `/end scrims` | admin | End the event: removes the Registered role from everyone, closes registration, fill and the drop map, stops any session and clears teams/claims |
 | `/unregister <user>` | admin | Remove registration, team seat and role |
 | `/team set <name>` · `leave` · `view` | players | Manage your trio |
 

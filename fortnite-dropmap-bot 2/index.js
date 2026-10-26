@@ -304,6 +304,9 @@ const commands = [
     .addSubcommand((s) => s.setName('link').setDescription('Post the interactive map link in the drop-map channel'))
     .addSubcommand((s) => s.setName('reset').setDescription('Clear every claim (new match)'))
     .addSubcommand((s) => s.setName('refresh').setDescription('Re-post the drop map panel')),
+  new SlashCommandBuilder().setName('end').setDescription('End the event')
+    .setDefaultMemberPermissions(P.ManageGuild)
+    .addSubcommand((s) => s.setName('scrims').setDescription('Remove the Registered role from everyone, close every channel and reset teams')),
   new SlashCommandBuilder().setName('unregister').setDescription('Remove a player\'s registration, team seat and role')
     .setDefaultMemberPermissions(P.ManageGuild)
     .addUserOption((o) => o.setName('user').setDescription('Player to unregister').setRequired(true)),
@@ -464,6 +467,56 @@ async function handleDropAdmin(i) {
   }
   await refreshDrop(i.guild, { repost: true });
   return i.editReply('Panel re-posted.');
+}
+
+async function handleEnd(i) {
+  const g = G(i.guild.id);
+  if (!g.roleId) return reply(i, 'Run `/setup` first.');
+  await i.deferReply({ flags: EPHEMERAL });
+  const guild = i.guild;
+
+  // 1) stop any running session, then close registration, fill and the drop map
+  clearTimeout(timers.get(guild.id));
+  timers.delete(guild.id);
+  g.session = null;
+  g.open = { registration: false, fill: false, dropmap: false };
+  await closeAllFills(guild);
+  const fillCh = g.channels.fill && guild.channels.cache.get(g.channels.fill);
+  if (fillCh) await fillCh.permissionOverwrites.edit(g.roleId, { SendMessagesInThreads: false }).catch(() => {});
+
+  // 2) take the Registered role away from everyone who has it
+  //    (registered players from our records + anyone the bot can see holding the role)
+  const ids = new Set(Object.keys(g.players));
+  const role = guild.roles.cache.get(g.roleId);
+  if (role) for (const id of role.members.keys()) ids.add(id);
+  let removed = 0; let gone = 0; const failed = [];
+  for (const id of ids) {
+    const member = await guild.members.fetch(id).catch(() => null);
+    if (!member) { gone++; continue; }                         // left the server
+    if (!member.roles.cache.has(g.roleId)) continue;           // already without the role
+    try { await member.roles.remove(g.roleId, 'Scrims ended'); removed++; } catch { failed.push(id); }
+  }
+
+  // 3) reset the event. Anyone whose role could not be removed stays on record so /end scrims can be run again.
+  const keep = Object.fromEntries(failed.filter((id) => g.players[id]).map((id) => [id, { ...g.players[id], team: null }]));
+  g.players = keep; g.teams = {}; g.claims = {}; g.fills = {};
+  save();
+
+  // 4) show the closed state on every panel
+  await refreshRegister(guild);
+  await refreshDrop(guild);
+  await refreshFill(guild);
+  const regCh = g.channels.register && guild.channels.cache.get(g.channels.register);
+  if (regCh) await regCh.send({ content: 'The scrims have ended. Thanks for playing! Registration, fill and the drop map are closed.', allowedMentions: { parse: [] } }).catch(() => {});
+
+  return i.editReply(
+    `Scrims ended. Removed the role from **${removed}** player(s); registration, fill and the drop map are closed; teams and claims are cleared.` +
+    (gone ? `\n${gone} registered player(s) have left the server.` : '') +
+    (failed.length
+      ? `\n⚠️ Couldn't remove the role from ${failed.length} player(s): ${failed.map((id) => `<@${id}>`).join(' ')}. ` +
+        'Move my bot role **above** the registered role, then run `/end scrims` again.'
+      : ''),
+  );
 }
 
 async function handleUnregister(i) {
@@ -689,6 +742,7 @@ async function start() {
           case 'host': return await handleHost(i, client);
           case 'team': return await handleTeam(i);
           case 'dropmap': return await handleDropAdmin(i);
+          case 'end': return await handleEnd(i);
           case 'unregister': return await handleUnregister(i);
         }
       } else if (i.isButton()) return await handleButton(i);
