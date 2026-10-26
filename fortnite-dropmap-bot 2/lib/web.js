@@ -67,23 +67,79 @@ function createWeb(ctx) {
   const safeNext = (n) => (/^\/g\/\d{5,25}$/.test(n || '') ? n : '/');
   const lastAction = new Map();
 
-  function buildState(guild, g, userId, hasRole) {
+  /* ---- captain avatars (public Discord CDN URLs only; never tokens or secrets) ---- */
+  const AVATAR_OK = /^https:\/\/cdn\.discordapp\.com\//;
+  const AVATAR_OPTS = { extension: 'png', size: 128 };
+  const AVATAR_TTL = 10 * 60 * 1000;        // keep a found avatar for 10 minutes
+  const AVATAR_MISS_TTL = 60 * 1000;        // retry a failed lookup after 1 minute
+  const AVATAR_TIMEOUT = 2500;              // never let a slow lookup stall the 3s poll
+  const avatarCache = new Map();            // "guildId:userId" -> { promise, exp }
+
+  const avatarUrlOf = (obj) => {
+    try {
+      const url = typeof obj?.displayAvatarURL === 'function' ? obj.displayAvatarURL(AVATAR_OPTS) : null;
+      return typeof url === 'string' && AVATAR_OK.test(url) ? url : null;
+    } catch { return null; }
+  };
+
+  async function lookupAvatar(guild, userId) {
+    try {
+      const member = await guild.members.fetch(userId).catch(() => null);
+      let url = avatarUrlOf(member);                       // server avatar if set, else the user's
+      if (!url && ctx.client.users) {
+        url = avatarUrlOf(await ctx.client.users.fetch(userId).catch(() => null));
+      }
+      return url;
+    } catch { return null; }
+  }
+
+  function getAvatar(guild, userId) {
+    const key = `${guild.id}:${userId}`;
+    const now = Date.now();
+    const hit = avatarCache.get(key);
+    if (hit && hit.exp > now) return hit.promise;
+    if (avatarCache.size > 1000) avatarCache.clear();
+    const promise = Promise.race([
+      lookupAvatar(guild, userId),
+      new Promise((resolve) => setTimeout(() => resolve(null), AVATAR_TIMEOUT)),
+    ]);
+    const entry = { promise, exp: now + AVATAR_TTL };
+    avatarCache.set(key, entry);
+    promise.then((url) => { if (!url) entry.exp = Date.now() + AVATAR_MISS_TTL; });
+    return promise;
+  }
+
+  async function buildState(guild, g, userId, hasRole) {
+    // Snapshot everything from `g` first, so the awaits below can't mix two versions of the game state.
     const team = L.teamOf(g, userId);
-    return {
+    const base = {
       guildName: guild.name,
       open: g.open.dropmap,
       game: g.session ? { current: g.session.current, total: g.session.total, nextAt: g.session.nextAt } : null,
       status: L.actorStatus(g, hasRole, userId),
       team: team ? { name: team.name, members: team.members.map((u) => g.players[u]?.epic || 'player') } : null,
-      regions: cfg.regions.map((r) => {
-        const keys = g.claims[r.id] || [];
-        return {
-          id: r.id, name: r.name,
-          state: keys.length === 0 ? 'free' : keys.length === 1 ? 'claimed' : 'contested',
-          teams: keys.map((k) => g.teams[k]?.name || k),
-          mine: !!team && keys.includes(team.key),
-        };
-      }),
+    };
+    const rows = cfg.regions.map((r) => {
+      const keys = g.claims[r.id] || [];
+      return {
+        id: r.id, name: r.name,
+        state: keys.length === 0 ? 'free' : keys.length === 1 ? 'claimed' : 'contested',
+        teams: keys.map((k) => g.teams[k]?.name || k),
+        mine: !!team && keys.includes(team.key),
+        // captain = first member of the team (logic.js has no explicit captain field)
+        claimants: keys.map((k) => ({ team: g.teams[k]?.name || k, captainId: g.teams[k]?.members?.[0] || null })),
+      };
+    });
+
+    const captainIds = [...new Set(rows.flatMap((r) => r.claimants.map((c) => c.captainId)).filter(Boolean))];
+    const avatars = new Map(await Promise.all(captainIds.map(async (id) => [id, await getAvatar(guild, id)])));
+
+    return {
+      ...base,
+      regions: rows.map(({ claimants, ...r }) => ({
+        ...r,
+        claimants: claimants.map((c) => ({ team: c.team, avatar: (c.captainId && avatars.get(c.captainId)) || null })),
+      })),
     };
   }
 
@@ -99,7 +155,7 @@ function createWeb(ctx) {
 
     if (action === 'state') {
       if (req.method !== 'GET') return json(res, 405, { error: 'GET only' });
-      return json(res, 200, { state: buildState(guild, g, sess.id, hasRole) });
+      return json(res, 200, { state: await buildState(guild, g, sess.id, hasRole) });
     }
 
     if (req.method !== 'POST') return json(res, 405, { error: 'POST only' });
@@ -113,7 +169,7 @@ function createWeb(ctx) {
 
     if (action === 'claim') {
       const r = L.claimFor(g, sess.id, hasRole, String(body.regionId || ''), REGION_IDS);
-      const state = buildState(guild, g, sess.id, hasRole);
+      const state = await buildState(guild, g, sess.id, hasRole);
       if (!r.ok) return json(res, 400, { error: r.error, state });
       ctx.save();
       ctx.onChange(guild);
@@ -121,14 +177,14 @@ function createWeb(ctx) {
       const message = r.status === 'already' ? `Your team already holds ${name}.`
         : r.status === 'contested' ? `Contesting ${name} against ${r.others.map((k) => g.teams[k]?.name || k).join(', ')}.`
         : `${r.team.name} claimed ${name}.`;
-      return json(res, 200, { message, state: buildState(guild, g, sess.id, hasRole) });
+      return json(res, 200, { message, state: await buildState(guild, g, sess.id, hasRole) });
     }
 
     const r = L.releaseFor(g, sess.id, hasRole);
-    if (!r.ok) return json(res, 400, { error: r.error, state: buildState(guild, g, sess.id, hasRole) });
+    if (!r.ok) return json(res, 400, { error: r.error, state: await buildState(guild, g, sess.id, hasRole) });
     ctx.save();
     ctx.onChange(guild);
-    return json(res, 200, { message: 'Your team\'s spot is released.', state: buildState(guild, g, sess.id, hasRole) });
+    return json(res, 200, { message: 'Your team\'s spot is released.', state: await buildState(guild, g, sess.id, hasRole) });
   }
 
   async function oauthCallback(req, res, url) {

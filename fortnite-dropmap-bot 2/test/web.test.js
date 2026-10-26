@@ -138,3 +138,119 @@ test('web: rapid repeat actions are rate limited', async () => {
     assert.equal(r.status, 429);
   });
 });
+
+/* ---------------- captain avatars ---------------- */
+const CDN = 'https://cdn.discordapp.com';
+const AV_OPTS = { extension: 'png', size: 128 };
+
+function avatarSetup({ memberFor, userFor } = {}) {
+  const g = L.ensureGuild({});
+  g.roleId = 'role1';
+  for (const [id, epic, team] of [['cap1', 'Cap1', 'Alpha'], ['mate1', 'Mate1', 'Alpha'], ['cap2', 'Cap2', 'Bravo'], ['cap3', 'Cap3', 'Charlie']]) {
+    g.players[id] = { epic, platform: 'PC', region: 'EU', team: null };
+    L.setTeam(g, id, team);                       // first to join = members[0] = captain
+  }
+  const calls = { asked: [] };
+  const mk = (id) => ({
+    roles: { cache: { has: () => true } },
+    displayAvatarURL: (o) => { calls.opts = o; return `${CDN}/avatars/${id}/hash.png?size=128`; },
+  });
+  const guild = {
+    id: GID, name: 'Test Server',
+    members: { fetch: async (id) => { calls.asked.push(id); return memberFor ? memberFor(id, mk) : mk(id); } },
+  };
+  const web = createWeb({
+    client: { user: { id: 'bot' }, guilds: { cache: new Map([[GID, guild]]) }, users: { fetch: async (id) => (userFor ? userFor(id, mk) : null) } },
+    G: () => g, save() {}, onChange() {}, baseUrl: 'http://localhost', clientSecret: 'x', secret: 'testsecret',
+  });
+  return { g, web, calls };
+}
+const getState = async (base, web, id) => (await (await fetch(`${base}/api/g/${GID}/state`, { headers: { Cookie: cookie(web, id) } })).json()).state;
+const regionOf = (state, id) => state.regions.find((r) => r.id === id);
+
+test('avatars: claimed region carries the captain (members[0]) avatar, requested as 128px png', async () => {
+  const { g, web, calls } = avatarSetup();
+  L.claim(g, 'alpha', ids[0]);
+  await withServer(web, async (base) => {
+    const st = await getState(base, web, 'cap1');
+    assert.deepEqual(regionOf(st, ids[0]).claimants, [{ team: 'Alpha', avatar: `${CDN}/avatars/cap1/hash.png?size=128` }]);
+    assert.deepEqual(calls.opts, AV_OPTS);
+    assert.ok(!JSON.stringify(st).includes('mate1'), 'only the captain is looked up, no other member ids leak');
+    assert.deepEqual(regionOf(st, ids[1]).claimants, []);            // free region: no avatar
+  });
+});
+
+test('avatars: contested region lists every claiming team in order', async () => {
+  const { g, web } = avatarSetup();
+  L.claim(g, 'alpha', ids[2]); L.claim(g, 'bravo', ids[2]); L.claim(g, 'charlie', ids[2]);
+  await withServer(web, async (base) => {
+    const r = regionOf(await getState(base, web, 'cap1'), ids[2]);
+    assert.equal(r.state, 'contested');
+    assert.deepEqual(r.claimants.map((c) => c.team), ['Alpha', 'Bravo', 'Charlie']);
+    assert.ok(r.claimants.every((c) => c.avatar && c.avatar.startsWith(CDN)));
+    assert.deepEqual(r.teams, ['Alpha', 'Bravo', 'Charlie']);       // existing fields unchanged
+  });
+});
+
+test('avatars: missing member, missing avatar function and bad URLs all degrade to null (no errors)', async () => {
+  const { g, web } = avatarSetup({
+    memberFor: (id, mk) => {
+      if (id === 'cap1') return null;                                              // left the server
+      if (id === 'cap2') return { roles: { cache: { has: () => true } } };         // no displayAvatarURL at all
+      return { roles: { cache: { has: () => true } }, displayAvatarURL: () => 'http://evil.example/x.png' }; // non-Discord URL
+    },
+    userFor: (id) => (id === 'cap1' ? null : undefined),
+  });
+  L.claim(g, 'alpha', ids[0]); L.claim(g, 'bravo', ids[1]); L.claim(g, 'charlie', ids[2]);
+  await withServer(web, async (base) => {
+    const st = await getState(base, web, 'cap2');
+    for (const id of [ids[0], ids[1], ids[2]]) {
+      assert.equal(regionOf(st, id).claimants[0].avatar, null);
+      assert.equal(regionOf(st, id).state, 'claimed');
+    }
+  });
+});
+
+test('avatars: falls back to the user object when the guild member is gone', async () => {
+  const { g, web } = avatarSetup({
+    memberFor: (id, mk) => (id === 'cap1' ? null : mk(id)),
+    userFor: (id) => ({ displayAvatarURL: () => `${CDN}/avatars/${id}/user.png` }),
+  });
+  L.claim(g, 'alpha', ids[0]);
+  await withServer(web, async (base) => {
+    const st = await getState(base, web, 'cap2');
+    assert.equal(regionOf(st, ids[0]).claimants[0].avatar, `${CDN}/avatars/cap1/user.png`);
+  });
+});
+
+test('avatars: lookups are cached between polls and a slow lookup cannot stall the state endpoint', async () => {
+  const { g, web, calls } = avatarSetup();
+  L.claim(g, 'alpha', ids[0]);
+  await withServer(web, async (base) => {
+    await getState(base, web, 'cap2');
+    const before = calls.asked.filter((x) => x === 'cap1').length;
+    await getState(base, web, 'cap2'); await getState(base, web, 'cap2');
+    assert.equal(calls.asked.filter((x) => x === 'cap1').length, before, 'captain fetched once, then cached');
+  });
+  const slow = avatarSetup({ memberFor: (id, mk) => (id === 'cap1' ? new Promise(() => {}) : mk(id)) });
+  L.claim(slow.g, 'alpha', ids[0]);
+  await withServer(slow.web, async (base) => {
+    const t0 = Date.now();
+    const st = await getState(base, slow.web, 'cap2');
+    assert.ok(Date.now() - t0 < 4000, 'returned despite a hung lookup');
+    assert.equal(regionOf(st, ids[0]).claimants[0].avatar, null);
+  });
+});
+
+test('avatars: claim and release responses still return a full state with claimants', async () => {
+  const { web } = avatarSetup();
+  await withServer(web, async (base) => {
+    const r = await post(base, `/api/g/${GID}/claim`, cookie(web, 'cap1'), { regionId: ids[3] });
+    const d = await r.json();
+    assert.equal(r.status, 200);
+    assert.equal(regionOf(d.state, ids[3]).claimants[0].team, 'Alpha');
+    await new Promise((res) => setTimeout(res, 800));
+    const rel = await (await post(base, `/api/g/${GID}/release`, cookie(web, 'cap1'), {})).json();
+    assert.deepEqual(regionOf(rel.state, ids[3]).claimants, []);
+  });
+});
