@@ -4,7 +4,7 @@ Registration → role → **interactive web drop map** (every box on your map is
 
 ## How it plays
 
-- **Register** (`#register`): players enter Epic name, platform, region and a **team name**. Three players typing the same team name = a trio. They get the **Registered Player** role, which unlocks `#drop-map` and `#fill`.
+- **Register** (`#register`): players enter Epic name, platform, region and a **team name**. Players typing the same team name form a team (size set by `/mode`: solos 1, duos 2, trios 3, squads 4; default trios). They get the **Registered Player** role, which unlocks `#drop-map` and `#fill`.
 - **Drop map**: `/open dropmap` posts a **link** to the interactive map in `#drop-map`. Players open it, log in with Discord, tap a box, press **Drop here**.
   - A team picks a box → it turns **black** (claimed).
   - Another team picks the same box → it turns **red** (contested). If a team leaves, it goes back to black / unclaimed.
@@ -24,6 +24,7 @@ Registration → role → **interactive web drop map** (every box on your map is
 | `/host start games:<1-6>` | admin | Start a session, 30 min per game |
 | `/host status` · `/host stop` | admin | Check time to next game / end the session early |
 | `/dropmap link` · `reset` · `refresh` | admin | Re-post the link / clear all claims / re-post the panel |
+| `/mode type:<solos/duos/trios/squads>` | admin | Choose the format. Team size follows it (1/2/3/4 per team). Switching clears teams, claims and fill requests; in solos every registered player automatically gets their own team |
 | `/end scrims` | admin | End the event: removes the Registered role from everyone, closes registration, fill and the drop map, stops any session and clears teams/claims |
 | `/unregister <user>` | admin | Remove registration, team seat and role |
 | `/team set <name>` · `leave` · `view` | players | Manage your trio |

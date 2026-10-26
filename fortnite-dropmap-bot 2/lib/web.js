@@ -114,6 +114,7 @@ function createWeb(ctx) {
     const team = L.teamOf(g, userId);
     const base = {
       guildName: guild.name,
+      mode: L.modeOf(g).label,
       open: g.open.dropmap,
       game: g.session ? { current: g.session.current, total: g.session.total, nextAt: g.session.nextAt } : null,
       status: L.actorStatus(g, hasRole, userId),

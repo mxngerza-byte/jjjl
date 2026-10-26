@@ -57,15 +57,18 @@ const teamName = (g, key) => g.teams[key]?.name || key;
 function registerPanel(g) {
   const s = g.session;
   const open = g.open.registration;
+  const mode = L.modeOf(g);
   const embed = new EmbedBuilder()
     .setColor(open ? 0x7b4dff : 0x808080)
-    .setTitle(s ? `📝 Registration — Game ${s.current} of ${s.total}` : '📝 Player Registration')
+    .setTitle(`${s ? `📝 Registration — Game ${s.current} of ${s.total}` : '📝 Player Registration'} · ${mode.label}`)
     .setDescription(
-      open
-        ? 'Enter your Epic name and **team name** to unlock the drop map and fill channels.\n' +
-          'Trios: everyone on your team types the **same team name** (max 3 players).\n' +
-          'No team yet? Leave it blank and use the fill channel.'
-        : '🔒 **Registration is closed.**',
+      !open
+        ? '🔒 **Registration is closed.**'
+        : mode.size === 1
+          ? 'Enter your Epic name to unlock the drop map.\nThis event is **solos**: you play on your own, no team name needed.'
+          : 'Enter your Epic name and **team name** to unlock the drop map and fill channels.\n' +
+            `${mode.label}: everyone on your team types the **same team name** (max ${mode.size} players).\n` +
+            'No team yet? Leave it blank and use the fill channel.',
     );
   if (s) {
     embed.addFields({ name: 'Registered for this game', value: `${s.roster.length} player(s)`, inline: true });
@@ -81,13 +84,17 @@ function registerPanel(g) {
 
 function fillPanel(g) {
   const open = g.open.fill;
+  const mode = L.modeOf(g);
+  const solos = mode.size === 1;
   return {
-    embeds: [new EmbedBuilder().setColor(open ? 0x2ecc71 : 0x808080).setTitle('🔎 Fill Finder (trios)')
-      .setDescription(open
-        ? 'Need teammates? Post a request and others can join with one click. When the trio is full, the bot puts everyone on one team and a thread is created for them.'
-        : '🔒 **The fill channel is closed.**')],
+    embeds: [new EmbedBuilder().setColor(open ? 0x2ecc71 : 0x808080).setTitle(`🔎 Fill Finder (${mode.label.toLowerCase()})`)
+      .setDescription(!open
+        ? '🔒 **The fill channel is closed.**'
+        : solos
+          ? 'This event is **solos**, so there is nothing to fill. Everyone plays on their own.'
+          : `Need teammates? Post a request and others can join with one click. When the ${mode.one.toLowerCase()} is full, the bot puts everyone on one team and a thread is created for them.`)],
     components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('fill:new').setLabel('Post a fill request').setStyle(ButtonStyle.Success).setDisabled(!open),
+      new ButtonBuilder().setCustomId('fill:new').setLabel('Post a fill request').setStyle(ButtonStyle.Success).setDisabled(!open || solos),
     )],
   };
 }
@@ -151,19 +158,20 @@ function fillEmbed(g, f) {
     const p = g.players[u];
     return `${i === 0 ? '👑' : '•'} <@${u}>${p ? ` — \`${p.epic}\` (${p.platform} / ${p.region})` : ''}`;
   });
+  const size = f.size || L.teamSize(g);
   const status = f.closed
     ? (f.teamName ? `✅ Team formed: ${f.teamName}` : '🔒 Closed')
-    : `🔎 Looking for ${L.MAX_TEAM - f.members.length} more`;
+    : `🔎 Looking for ${size - f.members.length} more`;
   const e = new EmbedBuilder()
     .setColor(f.closed ? (f.teamName ? 0xf5a623 : 0x808080) : 0x2ecc71)
-    .setTitle(`Trio fill — ${status}`)
-    .addFields({ name: `Squad (${f.members.length}/${L.MAX_TEAM})`, value: roster.join('\n') });
+    .setTitle(`${L.modeOf(g).one} fill — ${status}`)
+    .addFields({ name: `Team (${f.members.length}/${size})`, value: roster.join('\n') });
   if (f.notes) e.addFields({ name: 'Notes', value: f.notes.slice(0, 1000) });
   return e;
 }
 
 const fillButtons = (f) => [new ActionRowBuilder().addComponents(
-  new ButtonBuilder().setCustomId('fill:join').setLabel('Join').setStyle(ButtonStyle.Success).setDisabled(f.closed || f.members.length >= L.MAX_TEAM),
+  new ButtonBuilder().setCustomId('fill:join').setLabel('Join').setStyle(ButtonStyle.Success).setDisabled(f.closed || f.members.length >= (f.size || L.MAX_TEAM)),
   new ButtonBuilder().setCustomId('fill:leave').setLabel('Leave').setStyle(ButtonStyle.Secondary).setDisabled(f.closed),
   new ButtonBuilder().setCustomId('fill:close').setLabel('Close').setStyle(ButtonStyle.Danger).setDisabled(f.closed),
 )];
@@ -294,8 +302,8 @@ const commands = [
         .setMinValue(1).setMaxValue(L.MAX_GAMES)))
     .addSubcommand((s) => s.setName('stop').setDescription('Stop the running session'))
     .addSubcommand((s) => s.setName('status').setDescription('Show the current game and time to the next one')),
-  new SlashCommandBuilder().setName('team').setDescription('Manage your trio')
-    .addSubcommand((s) => s.setName('set').setDescription('Join or create a team (max 3 players)')
+  new SlashCommandBuilder().setName('team').setDescription('Manage your team')
+    .addSubcommand((s) => s.setName('set').setDescription('Join or create a team')
       .addStringOption((o) => o.setName('name').setDescription('Team name').setRequired(true).setMaxLength(24)))
     .addSubcommand((s) => s.setName('leave').setDescription('Leave your team'))
     .addSubcommand((s) => s.setName('view').setDescription('Show your team')),
@@ -304,6 +312,11 @@ const commands = [
     .addSubcommand((s) => s.setName('link').setDescription('Post the interactive map link in the drop-map channel'))
     .addSubcommand((s) => s.setName('reset').setDescription('Clear every claim (new match)'))
     .addSubcommand((s) => s.setName('refresh').setDescription('Re-post the drop map panel')),
+  new SlashCommandBuilder().setName('mode').setDescription('Choose the event format: solos, duos, trios or squads')
+    .setDefaultMemberPermissions(P.ManageGuild)
+    .addStringOption((o) => o.setName('type').setDescription('Players per team').setRequired(true).addChoices(
+      { name: 'Solos (1 per team)', value: 'solos' }, { name: 'Duos (2 per team)', value: 'duos' },
+      { name: 'Trios (3 per team)', value: 'trios' }, { name: 'Squads (4 per team)', value: 'squads' })),
   new SlashCommandBuilder().setName('end').setDescription('End the event')
     .setDefaultMemberPermissions(P.ManageGuild)
     .addSubcommand((s) => s.setName('scrims').setDescription('Remove the Registered role from everyone, close every channel and reset teams')),
@@ -409,7 +422,7 @@ async function handleHost(i, client) {
     await refreshFill(i.guild);
     await postDropLink(i.guild, '🗺️ **Game 1 map is ready.** Register, then tap your team\'s spot:');
     scheduleSession(client, i.guild.id);
-    return i.editReply(`Hosting **${s.total}** game(s). Game 2's registration (+ @here) goes out <t:${Math.floor(s.nextAt / 1000)}:R>.`);
+    return i.editReply(`Hosting **${s.total}** game(s) of **${L.modeOf(g).label}**. Game 2's registration (+ @here) goes out <t:${Math.floor(s.nextAt / 1000)}:R>.`);
   }
 
   if (sub === 'stop') {
@@ -434,12 +447,15 @@ async function handleTeam(i) {
   const sub = i.options.getSubcommand();
   if (!g.players[i.user.id]) return reply(i, `Register first in <#${g.channels.register}>.`);
 
+  if (L.teamSize(g) === 1 && sub !== 'view') {
+    return reply(i, 'This event is **solos**, so you play on your own and there are no teams to manage.');
+  }
   if (sub === 'set') {
     const r = L.setTeam(g, i.user.id, i.options.getString('name'));
     if (!r.ok) return reply(i, r.error);
     save();
     scheduleDropRefresh(i.guild);
-    return reply(i, `You're on team **${r.team.name}** (${r.team.members.length}/${L.MAX_TEAM}).`);
+    return reply(i, `You're on team **${r.team.name}** (${r.team.members.length}/${L.teamSize(g)}).`);
   }
   if (sub === 'leave') {
     if (!L.leaveTeam(g, i.user.id)) return reply(i, 'You\'re not on a team.');
@@ -449,7 +465,7 @@ async function handleTeam(i) {
   }
   const t = L.teamOf(g, i.user.id);
   if (!t) return reply(i, 'You\'re not on a team. Use `/team set` or the fill channel.');
-  return reply(i, `**${t.name}** (${t.members.length}/${L.MAX_TEAM}): ${t.members.map((u) => `<@${u}>`).join(' ')}`);
+  return reply(i, `**${t.name}** (${t.members.length}/${L.teamSize(g)}): ${t.members.map((u) => `<@${u}>`).join(' ')}`);
 }
 
 async function handleDropAdmin(i) {
@@ -467,6 +483,26 @@ async function handleDropAdmin(i) {
   }
   await refreshDrop(i.guild, { repost: true });
   return i.editReply('Panel re-posted.');
+}
+
+async function handleMode(i) {
+  const g = G(i.guild.id);
+  const type = i.options.getString('type');
+  if (type === g.mode) return reply(i, `Already running **${L.modeOf(g).label}**. Nothing changed.`);
+  await i.deferReply({ flags: EPHEMERAL });
+  await closeAllFills(i.guild);               // open fill requests no longer fit the new team size
+  const r = L.setMode(g, type);
+  if (!r.ok) return i.editReply(r.error);
+  save();
+  await refreshRegister(i.guild);
+  await refreshFill(i.guild);
+  await refreshDrop(i.guild);
+  return i.editReply(
+    `Mode set to **${r.mode.label}** (${r.mode.size} per team). Teams, claims and fill requests were cleared.\n` +
+    (r.mode.size === 1
+      ? `${r.players} registered player(s) now each have their own solo team.`
+      : `${r.players} registered player(s) are still registered and need to join or create a team again (team name or the fill channel).`),
+  );
 }
 
 async function handleEnd(i) {
@@ -550,14 +586,17 @@ async function handleButton(i) {
       if (val) input.setValue(val);
       return new ActionRowBuilder().addComponents(input);
     };
-    return i.showModal(new ModalBuilder().setCustomId('reg:modal').setTitle(
-      g.session ? `Register — Game ${g.session.current}/${g.session.total}` : 'Player Registration',
-    ).addComponents(
+    const size = L.teamSize(g);
+    const rows = [
       field('epic', 'Epic Games username', 'e.g. Ninja', p.epic),
       field('platform', 'Platform', 'PC / Console / Mobile', p.platform),
       field('region', 'Region', 'NAE / NAW / EU / ME / BR / ASIA / OCE', p.region),
-      field('team', 'Team name (same for all 3 teammates)', 'Leave blank if you need a fill', t?.name, false),
-    ));
+    ];
+    // solos: every player is their own team, so no team name is asked for
+    if (size > 1) rows.push(field('team', `Team name (same for all ${size} teammates)`, 'Leave blank if you need a fill', t?.name, false));
+    return i.showModal(new ModalBuilder().setCustomId('reg:modal').setTitle(
+      g.session ? `Register — Game ${g.session.current}/${g.session.total}` : 'Player Registration',
+    ).addComponents(...rows));
   }
 
   if (id === 'drop:clear') {
@@ -569,8 +608,9 @@ async function handleButton(i) {
 
   if (id === 'fill:new') {
     if (!g.open.fill) return reply(i, 'The fill channel is closed.');
+    if (L.teamSize(g) === 1) return reply(i, 'This event is **solos**, so there is nothing to fill.');
     const err = participantError(i, g); if (err) return reply(i, err);
-    return i.showModal(new ModalBuilder().setCustomId('fill:modal').setTitle('Post a fill request (trios)').addComponents(
+    return i.showModal(new ModalBuilder().setCustomId('fill:modal').setTitle(`Post a fill request (${L.modeOf(g).label.toLowerCase()})`).addComponents(
       new ActionRowBuilder().addComponents(
         new TextInputBuilder().setCustomId('notes').setLabel('Notes (optional)')
           .setPlaceholder('Playstyle, drop spot, mic required…')
@@ -596,7 +636,7 @@ async function handleButton(i) {
         await th.members.add(i.user.id).catch(() => {});
         await th.send({
           content: formed
-            ? `Trio complete! ${fill.members.map((u) => `<@${u}>`).join(' ')} are now team **${formed}**. Good luck!`
+            ? `${L.modeOf(g).one} complete! ${fill.members.map((u) => `<@${u}>`).join(' ')} are now team **${formed}**. Good luck!`
             : `<@${i.user.id}> joined.`,
           allowedMentions: { users: fill.members },
         }).catch(() => {});
@@ -659,13 +699,17 @@ async function handleModal(i) {
     const epic = i.fields.getTextInputValue('epic').trim();
     const platform = i.fields.getTextInputValue('platform').trim();
     const region = i.fields.getTextInputValue('region').trim().toUpperCase();
-    const team = i.fields.getTextInputValue('team').trim();
+    let team = '';
+    try { team = i.fields.getTextInputValue('team').trim(); } catch { /* solos: the form has no team field */ }
     if (!epic) return reply(i, 'Epic username can\'t be empty.');
     g.players[i.user.id] = { ...(g.players[i.user.id] || { team: null }), epic, platform, region };
     let teamNote = '';
-    if (team) {
+    if (L.teamSize(g) === 1) {
+      const r = L.soloTeam(g, i.user.id);
+      teamNote = r.ok ? ` You play solo as **${r.team.name}**.` : ` ${r.error}`;
+    } else if (team) {
       const r = L.setTeam(g, i.user.id, team);
-      teamNote = r.ok ? ` Team: **${r.team.name}** (${r.team.members.length}/${L.MAX_TEAM}).` : ` ${r.error}`;
+      teamNote = r.ok ? ` Team: **${r.team.name}** (${r.team.members.length}/${L.teamSize(g)}).` : ` ${r.error}`;
     } else if (!L.teamOf(g, i.user.id)) {
       teamNote = ' No team yet. Use the fill channel or `/team set`.';
     }
@@ -694,7 +738,7 @@ async function handleModal(i) {
     g.fills[msg.id] = r.fill;
     save();
     try {
-      const th = await msg.startThread({ name: `Trio fill - ${g.players[i.user.id]?.epic || i.user.username}`.slice(0, 100), autoArchiveDuration: 1440 });
+      const th = await msg.startThread({ name: `${L.modeOf(g).one} fill - ${g.players[i.user.id]?.epic || i.user.username}`.slice(0, 100), autoArchiveDuration: 1440 });
       await th.members.add(i.user.id);
     } catch { /* threads are a bonus */ }
     return i.editReply('Your fill request is posted.');
@@ -742,6 +786,7 @@ async function start() {
           case 'host': return await handleHost(i, client);
           case 'team': return await handleTeam(i);
           case 'dropmap': return await handleDropAdmin(i);
+          case 'mode': return await handleMode(i);
           case 'end': return await handleEnd(i);
           case 'unregister': return await handleUnregister(i);
         }
