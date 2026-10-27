@@ -253,3 +253,23 @@ test('bans: removes the player and blocks registering, teams, fills and claims',
   assert.equal(L.isBanned(g, 'a'), false);
   assert.equal(L.unbanUser(g, 'a').ok, false);
 });
+
+test('captain limit: caps new teams but not joining existing ones', () => {
+  const g = L.ensureGuild({}, 'g');
+  for (const u of ['a', 'b', 'c']) g.players[u] = { epic: u, platform: '?', region: '?', team: null };
+  assert.equal(L.setMaxTeams(g, 0).ok, false);
+  assert.equal(L.setMaxTeams(g, 101).ok, false);
+  assert.ok(L.setMaxTeams(g, 1).ok);
+  assert.ok(L.setTeam(g, 'a', 'Alpha').ok);
+  assert.equal(L.setTeam(g, 'b', 'Beta').ok, false);      // 2nd team blocked
+  assert.ok(L.setTeam(g, 'b', 'Alpha').ok);               // joining is fine
+  assert.equal(L.createFill(g, 'c').ok, false);           // teamless host can't start one either
+  assert.ok(L.setMaxTeams(g, null).ok);
+  assert.ok(L.setTeam(g, 'c', 'Beta').ok);
+});
+test('captain limit: a lone captain renaming their team does not count twice', () => {
+  const g = L.ensureGuild({}, 'g'); L.setMaxTeams(g, 1);
+  g.players.a = { epic: 'a', platform: '?', region: '?', team: null };
+  assert.ok(L.setTeam(g, 'a', 'One').ok);
+  assert.ok(L.setTeam(g, 'a', 'Two').ok);
+});
