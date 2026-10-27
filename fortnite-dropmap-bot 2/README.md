@@ -5,6 +5,7 @@ Registration → role → **interactive web drop map** (every box on your map is
 ## How it plays
 
 - **Register** (`#register`): players enter Epic name, platform, region and a **team name**. Players typing the same team name form a team (size set by `/mode`: solos 1, duos 2, trios 3, squads 4; default trios). They get the **Registered Player** role, which unlocks `#drop-map` and `#fill`.
+  - **Team captain picks teammates:** the player who creates a team by typing a new team name (duos, trios, squads) is the captain. Right after registering, the bot shows a menu where the captain @-selects up to (team size - 1) teammates. Each picked teammate is added to the team and given the **Registered Player** role, and the whole team gets a Discord role named after the team (no permissions). Teammates can press **Register** later to fill in their Epic name, platform and region. Picks are skipped if the person is a bot, not in the server, already on another team, or the team is full. Anyone who later joins by typing the same team name gets the team role too. Team roles are removed when the team empties, when you switch `/mode`, and on `/end scrims`. The bot needs **Manage Roles** and its role must sit above the Registered and team roles.
 - **Drop map**: `/open dropmap` posts a **link** to the interactive map in `#drop-map`. Players open it, log in with Discord, tap a box, press **Drop here**.
   - A team picks a box → it turns **black** (claimed).
   - Another team picks the same box → it turns **red** (contested). If a team leaves, it goes back to black / unclaimed.
