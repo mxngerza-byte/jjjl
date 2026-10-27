@@ -142,7 +142,7 @@ function actorStatus(g, hasRole, userId) {
 const ACTOR_ERRORS = {
   not_registered: 'Register first in the register channel.',
   not_in_game: 'Register for the current game first.',
-  no_team: 'You\'re not on a team yet. Register with a team name, use /team set, or find teammates in the fill channel.',
+  no_team: 'You\'re not on a team yet. Press Register again to pick teammates, use /team set, or find teammates in the fill channel.',
 };
 
 /** Shared by the Discord menu and the web map. */

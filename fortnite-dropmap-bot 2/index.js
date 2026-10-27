@@ -65,10 +65,10 @@ function registerPanel(g) {
       !open
         ? '🔒 **Registration is closed.**'
         : mode.size === 1
-          ? 'Enter your Epic name to unlock the drop map.\nThis event is **solos**: you play on your own, no team name needed.'
-          : 'Enter your Epic name and **team name** to unlock the drop map and fill channels.\n' +
-            `${mode.label}: everyone on your team types the **same team name** (max ${mode.size} players).\n` +
-            'No team yet? Leave it blank and use the fill channel.',
+          ? 'Press **Register** to unlock the drop map. Your Discord name is your player name, nothing to type.\nThis event is **solos**: you play on your own.'
+          : 'Press **Register** to unlock the drop map. Your Discord name is your player name, nothing to type.\n' +
+            `${mode.label}: team captains @ their teammates right after registering (max ${mode.size} players per team).\n` +
+            'No team? Use the fill channel.',
     );
   if (s) {
     embed.addFields({ name: 'Registered for this game', value: `${s.roster.length} player(s)`, inline: true });
@@ -156,7 +156,8 @@ async function postDropLink(guild, text) {
 function fillEmbed(g, f) {
   const roster = f.members.map((u, i) => {
     const p = g.players[u];
-    return `${i === 0 ? '👑' : '•'} <@${u}>${p ? ` — \`${p.epic}\` (${p.platform} / ${p.region})` : ''}`;
+    const known = p && p.platform && p.platform !== '?' && p.region && p.region !== '?';
+    return `${i === 0 ? '👑' : '•'} <@${u}>${p ? ` — \`${p.epic}\`${known ? ` (${p.platform} / ${p.region})` : ''}` : ''}`;
   });
   const size = f.size || L.teamSize(g);
   const status = f.closed
@@ -482,30 +483,46 @@ async function deleteAllTeamRoles(guild, g, reason) {
   }
 }
 
+/** A player's name = their Discord display name (server nickname, else global name, else username). */
+const epicOf = (member) => String(member.displayName || member.user?.username || 'Player').replace(/[`\\]/g, '').trim().slice(0, 32) || 'Player';
+
 /** After a captain registers: how many more teammates can he pick? null = don't ask (solos, not the captain, team full). */
 function captainPrompt(g, userId) {
   const size = L.teamSize(g);
+  if (size < 2) return null;
   const team = L.teamOf(g, userId);
-  if (size < 2 || !team || team.members[0] !== userId) return null;
+  if (!team) return { key: null, remaining: size - 1 };            // no team yet: they can start one
+  if (team.members[0] !== userId) return null;                     // a teammate, not the captain
   const remaining = size - team.members.length;
   return remaining > 0 ? { key: team.key, name: team.name, remaining } : null;
 }
 
 const pickRow = (p) => new ActionRowBuilder().addComponents(
-  new UserSelectMenuBuilder().setCustomId(`team:pick:${p.key}`).setPlaceholder('@ your teammates')
+  new UserSelectMenuBuilder().setCustomId(p.key ? `team:pick:${p.key}` : 'team:new').setPlaceholder('@ your teammates')
     .setMinValues(1).setMaxValues(Math.min(p.remaining, 25)),
 );
 
 async function handleUserSelect(i) {
-  if (!i.customId.startsWith('team:pick:')) return;
+  const isNew = i.customId === 'team:new';
+  if (!isNew && !i.customId.startsWith('team:pick:')) return;
   const g = G(i.guild.id);
-  const key = i.customId.slice('team:pick:'.length);
-  const team = g.teams[key];
-  if (!team || team.members[0] !== i.user.id) {
-    return i.update({ content: 'This team has changed, so that menu is out of date. Register again to pick teammates.', components: [] });
-  }
+  const outOfDate = () => i.update({ content: 'That menu is out of date. Press **Register** again to pick teammates.', components: [] });
+  let key = isNew ? null : i.customId.slice('team:pick:'.length);
+  let team = key && g.teams[key];
+  if (isNew ? (!g.players[i.user.id] || L.teamOf(g, i.user.id)) : (!team || team.members[0] !== i.user.id)) return outOfDate();
   if (!g.open.registration) return i.update({ content: 'Registration is closed.', components: [] });
   await i.deferUpdate();
+
+  let createdTeam = false;
+  if (isNew) {
+    // the captain's team is named after him, e.g. "Alex's Trio" (made unique if needed)
+    const base = L.cleanTeamName(`${g.players[i.user.id].epic}'s ${L.modeOf(g).one}`) || 'Team';
+    let name = base;
+    for (let n = 2; g.teams[L.teamKey(name)]; n++) name = L.cleanTeamName(`${base.slice(0, 21)} ${n}`);
+    const r = L.setTeam(g, i.user.id, name);
+    if (!r.ok) return i.editReply({ content: r.error, components: [] });
+    key = L.teamKey(name); team = g.teams[key]; createdTeam = true;
+  }
 
   const added = []; const skipped = [];
   for (const id of i.values) {
@@ -516,11 +533,16 @@ async function handleUserSelect(i) {
     const cur = L.teamOf(g, id);
     if (cur && cur.key !== key) { skipped.push(`<@${id}> (already on team ${cur.name})`); continue; }
     const created = !g.players[id];
-    if (created) g.players[id] = { epic: member.displayName.slice(0, 32), platform: '?', region: '?', team: null };
+    if (created) g.players[id] = { epic: epicOf(member), platform: '?', region: '?', team: null };
     const r = L.setTeam(g, id, team.name);
     if (!r.ok) { if (created) delete g.players[id]; skipped.push(`<@${id}> (team is full)`); continue; }
     L.addToRoster(g, id);
     added.push(member);
+  }
+  if (createdTeam && !added.length) {                              // nobody could be added: don't leave a team of one behind
+    L.leaveTeam(g, i.user.id);
+    save();
+    return i.editReply({ content: `No teammates were added${skipped.length ? `: ${skipped.join(', ')}` : ''}. Press **Register** to try again.`, components: [], allowedMentions: { parse: [] } });
   }
   save();
 
@@ -541,7 +563,7 @@ async function handleUserSelect(i) {
   if (!role) lines.push('⚠️ I couldn\'t create the team role. Check that I have **Manage Roles**.');
   if (roleFail) lines.push(`⚠️ I couldn't give ${roleFail} role(s). Move my bot role **above** the registered and team roles.`);
   if (skipped.length) lines.push(`Skipped: ${skipped.join(', ')}.`);
-  if (added.length) lines.push('They can press **Register** to add their Epic name, platform and region.');
+  if (added.length) lines.push('They play under their Discord names.');
   await i.editReply({ content: lines.join('\n'), components: [], allowedMentions: { parse: [] } });
   refreshRegister(i.guild).catch(() => {});
 }
@@ -683,33 +705,56 @@ async function handleUnregister(i) {
   return i.editReply(`Unregistered <@${user.id}>.`);
 }
 
+/** One-click registration: the player's Discord name is used as their player name, nothing to type. */
+async function handleRegister(i) {
+  const g = G(i.guild.id);
+  if (!g.roleId) return reply(i, 'An admin needs to run `/setup` first.');
+  if (!g.open.registration) return reply(i, 'Registration is closed.');
+  await i.deferReply({ flags: EPHEMERAL });
+
+  const epic = epicOf(i.member);
+  const existing = g.players[i.user.id];
+  g.players[i.user.id] = existing ? { ...existing, epic } : { epic, platform: '?', region: '?', team: null };
+  const teamBefore = teamSnapshot(g, i.user.id);
+  const size = L.teamSize(g);
+  let teamNote = '';
+  if (size === 1) {
+    const r = L.soloTeam(g, i.user.id);
+    teamNote = r.ok ? ` You play solo as **${r.team.name}**.` : ` ${r.error}`;
+  } else {
+    const t = L.teamOf(g, i.user.id);
+    if (t) teamNote = ` Team: **${t.name}** (${t.members.length}/${size}).`;
+  }
+  L.addToRoster(g, i.user.id);
+  save();
+  try {
+    await i.member.roles.add(g.roleId);
+  } catch {
+    return i.editReply('I registered you but couldn\'t give you the role. Ask an admin to move my bot role above the registered role.');
+  }
+  await updateTeamRoles(i.guild, g, i.user.id, teamBefore);
+  refreshRegister(i.guild).catch(() => {});
+
+  const prompt = captainPrompt(g, i.user.id);
+  const n = prompt ? `${prompt.remaining} teammate${prompt.remaining === 1 ? '' : 's'}` : '';
+  const ask = !prompt ? ''
+    : prompt.key
+      ? `\n\n**Team captain:** @ up to ${n} below. They'll get the Registered role and a **${prompt.name}** role.`
+      : `\n\n**Got a team?** @ up to ${n} below and I'll create your team for you (they get the Registered role and a team role). ` +
+        'Otherwise ignore this: a captain can add you, or use the fill channel.';
+  return i.editReply({
+    content:
+      `You're registered as **${epic}**${g.session ? ` for Game ${g.session.current}/${g.session.total}` : ''}.${teamNote}\n` +
+      `You can now see <#${g.channels.drop}> and <#${g.channels.fill}>. Interactive map: ${mapUrl(i.guild.id)}${ask}`,
+    components: prompt ? [pickRow(prompt)] : [],
+  });
+}
+
 async function handleButton(i) {
   const g = G(i.guild.id);
   const id = i.customId;
 
-  if (id === 'reg:open') {
-    if (!g.roleId) return reply(i, 'An admin needs to run `/setup` first.');
-    if (!g.open.registration) return reply(i, 'Registration is closed.');
-    const p = g.players[i.user.id] || {};
-    const t = L.teamOf(g, i.user.id);
-    const field = (cid, label, ph, val, required = true) => {
-      const input = new TextInputBuilder().setCustomId(cid).setLabel(label).setPlaceholder(ph)
-        .setStyle(TextInputStyle.Short).setRequired(required).setMaxLength(32);
-      if (val) input.setValue(val);
-      return new ActionRowBuilder().addComponents(input);
-    };
-    const size = L.teamSize(g);
-    const rows = [
-      field('epic', 'Epic Games username', 'e.g. Ninja', p.epic),
-      field('platform', 'Platform', 'PC / Console / Mobile', p.platform),
-      field('region', 'Region', 'NAE / NAW / EU / ME / BR / ASIA / OCE', p.region),
-    ];
-    // solos: every player is their own team, so no team name is asked for
-    if (size > 1) rows.push(field('team', `Team name (same for all ${size} teammates)`, 'Leave blank if you need a fill', t?.name, false));
-    return i.showModal(new ModalBuilder().setCustomId('reg:modal').setTitle(
-      g.session ? `Register — Game ${g.session.current}/${g.session.total}` : 'Player Registration',
-    ).addComponents(...rows));
-  }
+  if (id === 'reg:open') return handleRegister(i);
 
   if (id === 'drop:clear') {
     const r = L.releaseFor(g, i.user.id, hasRegisteredRole(i, g));
@@ -806,45 +851,8 @@ async function handleSelect(i) {
 async function handleModal(i) {
   const g = G(i.guild.id);
 
-  if (i.customId === 'reg:modal') {
-    if (!g.open.registration) return reply(i, 'Registration is closed.');
-    const epic = i.fields.getTextInputValue('epic').trim();
-    const platform = i.fields.getTextInputValue('platform').trim();
-    const region = i.fields.getTextInputValue('region').trim().toUpperCase();
-    let team = '';
-    try { team = i.fields.getTextInputValue('team').trim(); } catch { /* solos: the form has no team field */ }
-    if (!epic) return reply(i, 'Epic username can\'t be empty.');
-    g.players[i.user.id] = { ...(g.players[i.user.id] || { team: null }), epic, platform, region };
-    const teamBefore = teamSnapshot(g, i.user.id);
-    let teamNote = '';
-    if (L.teamSize(g) === 1) {
-      const r = L.soloTeam(g, i.user.id);
-      teamNote = r.ok ? ` You play solo as **${r.team.name}**.` : ` ${r.error}`;
-    } else if (team) {
-      const r = L.setTeam(g, i.user.id, team);
-      teamNote = r.ok ? ` Team: **${r.team.name}** (${r.team.members.length}/${L.teamSize(g)}).` : ` ${r.error}`;
-    } else if (!L.teamOf(g, i.user.id)) {
-      teamNote = ' No team yet. Use the fill channel or `/team set`.';
-    }
-    L.addToRoster(g, i.user.id);
-    save();
-    await i.deferReply({ flags: EPHEMERAL });
-    try {
-      await i.member.roles.add(g.roleId);
-    } catch {
-      return i.editReply('I saved your details but couldn\'t give you the role. Ask an admin to move my bot role above the registered role.');
-    }
-    await updateTeamRoles(i.guild, g, i.user.id, teamBefore);
-    refreshRegister(i.guild).catch(() => {});
-    const prompt = captainPrompt(g, i.user.id);
-    return i.editReply({
-      content:
-        `You're registered as **${epic}**${g.session ? ` for Game ${g.session.current}/${g.session.total}` : ''}.${teamNote}\n` +
-        `You can now see <#${g.channels.drop}> and <#${g.channels.fill}>. Interactive map: ${mapUrl(i.guild.id)}` +
-        (prompt ? `\n\n**Team captain:** @ up to ${prompt.remaining} teammate${prompt.remaining === 1 ? '' : 's'} below. ` +
-          `They'll get the Registered role and a **${prompt.name}** role.` : ''),
-      components: prompt ? [pickRow(prompt)] : [],
-    });
+  if (i.customId === 'reg:modal') {                                // an old registration form that was still open
+    return reply(i, 'Registration is now one click. Press **Register** in the register channel.');
   }
 
   if (i.customId === 'fill:modal') {
