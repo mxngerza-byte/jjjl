@@ -21,6 +21,7 @@ function defaults() {
     channels: { register: null, drop: null, fill: null },
     panels: { register: null, drop: null, fill: null },
     open: { registration: true, fill: true, dropmap: true },
+    bans: {},      // userId -> { reason, at, by }  (banned players can't register or play)
     mode: 'trios', // 'solos' | 'duos' | 'trios' | 'squads' -> players per team (1-4)
     players: {},   // userId -> { epic, platform, region, team: teamKey|null }
     teams: {},     // teamKey -> { name, members: [userId] }
@@ -54,6 +55,26 @@ function deleteTeam(g, key) {
   for (const p of Object.values(g.players)) if (p.team === key) p.team = null;
 }
 
+/* ---- bans ---- */
+const isBanned = (g, userId) => !!g.bans?.[userId];
+
+/** Ban a player: they're removed from their team, the roster and registration, and can't register again. */
+function banUser(g, userId, reason = '', by = null) {
+  if (isBanned(g, userId)) return { ok: false, error: 'That player is already banned.' };
+  leaveTeam(g, userId);
+  delete g.players[userId];
+  if (g.session) g.session.roster = g.session.roster.filter((u) => u !== userId);
+  for (const f of Object.values(g.fills || {})) f.members = f.members.filter((u) => u !== userId);
+  g.bans[userId] = { reason: String(reason || '').slice(0, 200), at: Date.now(), by };
+  return { ok: true };
+}
+
+function unbanUser(g, userId) {
+  if (!isBanned(g, userId)) return { ok: false, error: 'That player isn\'t banned.' };
+  delete g.bans[userId];
+  return { ok: true };
+}
+
 function leaveTeam(g, userId) {
   const p = g.players[userId];
   if (!p || !p.team) return false;
@@ -68,6 +89,7 @@ function leaveTeam(g, userId) {
 }
 
 function setTeam(g, userId, rawName) {
+  if (isBanned(g, userId)) return { ok: false, error: 'You are banned from these scrims.' };
   const p = g.players[userId];
   if (!p) return { ok: false, error: 'Register first.' };
   const name = cleanTeamName(rawName);
@@ -133,6 +155,7 @@ function claim(g, key, regionId) {
  * -> 'ok' | 'not_registered' | 'not_in_game' | 'no_team'
  */
 function actorStatus(g, hasRole, userId) {
+  if (isBanned(g, userId)) return 'banned';
   if (!g.roleId || !hasRole || !g.players[userId]) return 'not_registered';
   if (g.session && !g.session.roster.includes(userId)) return 'not_in_game';
   if (!teamOf(g, userId)) return 'no_team';
@@ -140,6 +163,7 @@ function actorStatus(g, hasRole, userId) {
 }
 
 const ACTOR_ERRORS = {
+  banned: 'You are banned from these scrims.',
   not_registered: 'Register first in the register channel.',
   not_in_game: 'Register for the current game first.',
   no_team: 'You\'re not on a team yet. Press Register again to pick teammates, use /team set, or find teammates in the fill channel.',
@@ -173,6 +197,7 @@ const resetClaims = (g) => { g.claims = {}; };
 /* ------------------------------ fill (teams of 2-4) ---------------- */
 /** Open a request. If the host already has teammates they are the "base" of the squad. */
 function createFill(g, hostId, notes = '') {
+  if (isBanned(g, hostId)) return { ok: false, error: 'You are banned from these scrims.' };
   const size = teamSize(g);
   if (size === 1) return { ok: false, error: 'This event is solos. Everyone plays on their own, so there is nothing to fill.' };
   if (Object.values(g.fills).some((f) => f.hostId === hostId)) {
@@ -187,6 +212,7 @@ function createFill(g, hostId, notes = '') {
 }
 
 function joinFill(g, fill, userId) {
+  if (isBanned(g, userId)) return { ok: false, error: 'You are banned from these scrims.' };
   if (fill.closed) return { ok: false, error: 'This request is closed.' };
   if (fill.members.includes(userId)) return { ok: false, error: 'You\'re already in this squad.' };
   const size = fill.size || teamSize(g);
@@ -257,6 +283,7 @@ module.exports = {
   MAX_TEAM, MAX_GAMES, GAME_MS, MODES, modeOf, teamSize, soloTeam, setMode,
   defaults, ensureGuild,
   cleanTeamName, teamKey, teamOf, setTeam, leaveTeam, deleteTeam,
+  isBanned, banUser, unbanUser,
   unclaim, claim, regionState, resetClaims, actorStatus, claimFor, releaseFor,
   createFill, joinFill, leaveFill, finalizeFill,
   startSession, advanceSession, addToRoster,
