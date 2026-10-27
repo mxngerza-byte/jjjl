@@ -22,6 +22,7 @@ function defaults() {
     panels: { register: null, drop: null, fill: null },
     open: { registration: true, fill: true, dropmap: true },
     bans: {},      // userId -> { reason, at, by }  (banned players can't register or play)
+    maxTeams: null, // null = unlimited, else 1-100: how many teams (captains) may exist
     mode: 'trios', // 'solos' | 'duos' | 'trios' | 'squads' -> players per team (1-4)
     players: {},   // userId -> { epic, platform, region, team: teamKey|null }
     teams: {},     // teamKey -> { name, members: [userId] }
@@ -88,6 +89,25 @@ function leaveTeam(g, userId) {
   return true;
 }
 
+const MAX_TEAMS_LIMIT = 100;
+
+/** Set (1-100) or clear (null) the cap on how many teams / captains can exist. */
+function setMaxTeams(g, n) {
+  if (n === null) { g.maxTeams = null; return { ok: true }; }
+  if (!Number.isInteger(n) || n < 1 || n > MAX_TEAMS_LIMIT) return { ok: false, error: `Choose a number from 1 to ${MAX_TEAMS_LIMIT}.` };
+  g.maxTeams = n;
+  return { ok: true };
+}
+
+/** Could this player start a brand-new team right now? (Leaving a team of one frees its slot.) */
+function canStartTeam(g, userId) {
+  if (!g.maxTeams) return true;
+  const own = teamOf(g, userId);
+  const freed = own && own.members.length === 1 ? 1 : 0;
+  return Object.keys(g.teams).length - freed < g.maxTeams;
+}
+const teamLimitError = (g) => `The team limit of **${g.maxTeams}** has been reached, so no new teams can be started. Ask a captain to add you, or use the fill channel to join an existing team.`;
+
 function setTeam(g, userId, rawName) {
   if (isBanned(g, userId)) return { ok: false, error: 'You are banned from these scrims.' };
   const p = g.players[userId];
@@ -97,6 +117,7 @@ function setTeam(g, userId, rawName) {
   const key = teamKey(name);
   if (p.team === key) return { ok: true, team: { key, ...g.teams[key] }, unchanged: true };
   const existing = g.teams[key];
+  if (!existing && !canStartTeam(g, userId)) return { ok: false, error: teamLimitError(g) };
   if (existing && existing.members.length >= teamSize(g)) {
     return { ok: false, error: `Team **${existing.name}** already has ${teamSize(g)} player${teamSize(g) === 1 ? '' : 's'}.` };
   }
@@ -204,6 +225,7 @@ function createFill(g, hostId, notes = '') {
     return { ok: false, error: 'You already have an open fill request. Close it first.' };
   }
   const team = teamOf(g, hostId);
+  if (!team && !canStartTeam(g, hostId)) return { ok: false, error: teamLimitError(g) };
   if (team && team.members.length >= size) {
     return { ok: false, error: `Your team is already full (${size}/${size}).` };
   }
@@ -283,7 +305,7 @@ module.exports = {
   MAX_TEAM, MAX_GAMES, GAME_MS, MODES, modeOf, teamSize, soloTeam, setMode,
   defaults, ensureGuild,
   cleanTeamName, teamKey, teamOf, setTeam, leaveTeam, deleteTeam,
-  isBanned, banUser, unbanUser,
+  isBanned, banUser, unbanUser, setMaxTeams, canStartTeam, teamLimitError, MAX_TEAMS_LIMIT,
   unclaim, claim, regionState, resetClaims, actorStatus, claimFor, releaseFor,
   createFill, joinFill, leaveFill, finalizeFill,
   startSession, advanceSession, addToRoster,

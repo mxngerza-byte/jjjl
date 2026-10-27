@@ -84,6 +84,10 @@ function registerPanel(g) {
     if (!solos) embed.addFields({ name: '👥 Team size', value: `Up to ${mode.size}`, inline: true });
     if (!solos) embed.addFields({ name: '🔎 No team?', value: 'Use the fill channel', inline: true });
   }
+  if (open && g.maxTeams) {
+    const used = Object.keys(g.teams).length;
+    embed.addFields({ name: '🎟️ Team slots', value: used >= g.maxTeams ? '**Full**' : `${g.maxTeams - used} of ${g.maxTeams} open`, inline: true });
+  }
   if (s) {
     embed.addFields(
       { name: '✅ Registered', value: `**${s.roster.length}** player${s.roster.length === 1 ? '' : 's'}`, inline: true },
@@ -378,6 +382,12 @@ const commands = [
   new SlashCommandBuilder().setName('end').setDescription('End the event')
     .setDefaultMemberPermissions(P.ManageGuild)
     .addSubcommand((s) => s.setName('scrims').setDescription('Remove the Registered role from everyone, close every channel and reset teams')),
+  new SlashCommandBuilder().setName('captains').setDescription('Limit how many teams (captains) can exist')
+    .setDefaultMemberPermissions(P.ManageGuild)
+    .addSubcommand((c) => c.setName('set').setDescription('Allow at most this many teams / captains')
+      .addIntegerOption((o) => o.setName('count').setDescription('1 to 100').setRequired(true).setMinValue(1).setMaxValue(100)))
+    .addSubcommand((c) => c.setName('off').setDescription('Remove the limit'))
+    .addSubcommand((c) => c.setName('view').setDescription('Show the limit and how many teams exist')),
   new SlashCommandBuilder().setName('ban').setDescription('Ban players from the scrims (they can\'t register)')
     .setDefaultMemberPermissions(P.ManageGuild)
     .addSubcommand((c) => c.setName('add').setDescription('Ban a player and remove them from the event')
@@ -754,6 +764,21 @@ async function handleEnd(i) {
   );
 }
 
+async function handleCaptains(i) {
+  const g = G(i.guild.id);
+  const sub = i.options.getSubcommand();
+  const used = Object.keys(g.teams).length;
+  if (sub === 'view') {
+    return reply(i, g.maxTeams ? `Team limit: **${g.maxTeams}** (${used} used, ${Math.max(0, g.maxTeams - used)} open).` : `No team limit. ${used} team${used === 1 ? '' : 's'} so far.`);
+  }
+  const r = L.setMaxTeams(g, sub === 'off' ? null : i.options.getInteger('count'));
+  if (!r.ok) return reply(i, r.error);
+  save();
+  refreshRegister(i.guild).catch(() => {});
+  const over = g.maxTeams && used > g.maxTeams ? ` ${used} teams already exist, so they stay, but no new ones can start until some leave.` : '';
+  return reply(i, g.maxTeams ? `Team limit set to **${g.maxTeams}**. ${used} used so far.${over}` : 'Team limit removed.');
+}
+
 async function handleBan(i) {
   const g = G(i.guild.id);
   const sub = i.options.getSubcommand();
@@ -814,6 +839,7 @@ async function handleRegister(i) {
   if (!g.roleId) return reply(i, 'An admin needs to run `/setup` first.');
   if (L.isBanned(g, i.user.id)) return reply(i, '🚫 You are banned from these scrims, so you can\'t register.');
   if (!g.open.registration) return reply(i, 'Registration is closed.');
+  if (L.teamSize(g) === 1 && !g.players[i.user.id]?.team && !L.canStartTeam(g, i.user.id)) return reply(i, L.teamLimitError(g).replace(' Ask a captain to add you, or use the fill channel to join an existing team.', ''));
   await i.deferReply({ flags: EPHEMERAL });
 
   const epic = epicOf(i.member);
@@ -1021,6 +1047,7 @@ async function start() {
           case 'end': return await handleEnd(i);
           case 'unregister': return await handleUnregister(i);
           case 'ban': return await handleBan(i);
+          case 'captains': return await handleCaptains(i);
         }
       } else if (i.isButton()) return await handleButton(i);
       else if (i.isUserSelectMenu()) return await handleUserSelect(i);

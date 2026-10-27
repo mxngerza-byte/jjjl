@@ -27,6 +27,7 @@ Registration → role → **interactive web drop map** (every box on your map is
 | `/dropmap link` · `reset` · `refresh` | admin | Re-post the link / clear all claims / re-post the panel |
 | `/mode type:<solos/duos/trios/squads>` | admin | Choose the format. Team size follows it (1/2/3/4 per team). Switching clears teams, claims and fill requests; in solos every registered player automatically gets their own team |
 | `/end scrims` | admin | End the event: removes the Registered role from everyone, closes registration, fill and the drop map, stops any session and clears teams/claims |
+| `/captains set <1-100>` · `off` · `view` | admin | Cap how many teams (captains) can exist; once reached, nobody can start a new team (in solos, registration fills up) |
 | `/ban add <user> [reason]` · `/ban remove <user>` · `/ban list` | admin | Ban a player (removed from team, roster and role; can't register, join fills or claim) / unban / list bans |
 | `/unregister <user>` | admin | Remove registration, team seat and role |
 | `/team set <name>` · `leave` · `view` | players | Manage your trio |
