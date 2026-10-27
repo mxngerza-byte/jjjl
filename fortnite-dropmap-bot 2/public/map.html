@@ -237,6 +237,7 @@
     if (!state.open) note = 'The drop map is locked right now.';
     else if (state.status === 'not_registered') note = 'You are not registered yet. Register in the Discord register channel, then reload this page.';
     else if (state.status === 'not_in_game') note = 'Register for the current game in Discord to take part, then reload.';
+    else if (state.status === 'banned') note = 'You are banned from these scrims.';
     else if (state.status === 'no_team') note = 'You are not on a team yet. Use /team set in Discord or the fill channel.';
     banner.hidden = !note;
     banner.textContent = note;

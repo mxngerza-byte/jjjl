@@ -378,6 +378,14 @@ const commands = [
   new SlashCommandBuilder().setName('end').setDescription('End the event')
     .setDefaultMemberPermissions(P.ManageGuild)
     .addSubcommand((s) => s.setName('scrims').setDescription('Remove the Registered role from everyone, close every channel and reset teams')),
+  new SlashCommandBuilder().setName('ban').setDescription('Ban players from the scrims (they can\'t register)')
+    .setDefaultMemberPermissions(P.ManageGuild)
+    .addSubcommand((c) => c.setName('add').setDescription('Ban a player and remove them from the event')
+      .addUserOption((o) => o.setName('user').setDescription('Player to ban').setRequired(true))
+      .addStringOption((o) => o.setName('reason').setDescription('Reason (shown in /ban list)').setMaxLength(200)))
+    .addSubcommand((c) => c.setName('remove').setDescription('Unban a player')
+      .addUserOption((o) => o.setName('user').setDescription('Player to unban').setRequired(true)))
+    .addSubcommand((c) => c.setName('list').setDescription('Show all banned players')),
   new SlashCommandBuilder().setName('unregister').setDescription('Remove a player\'s registration, team seat and role')
     .setDefaultMemberPermissions(P.ManageGuild)
     .addUserOption((o) => o.setName('user').setDescription('Player to unregister').setRequired(true)),
@@ -391,6 +399,7 @@ const hasRegisteredRole = (i, g) => !!(g.roleId && i.member.roles.cache.has(g.ro
 
 /** null if this member may take part right now, otherwise the message to show. */
 function participantError(i, g) {
+  if (L.isBanned(g, i.user.id)) return '🚫 You are banned from these scrims.';
   if (!hasRegisteredRole(i, g)) return `You need to register first in <#${g.channels.register}>.`;
   if (g.session && !g.session.roster.includes(i.user.id)) {
     return `Register for Game ${g.session.current} of ${g.session.total} first in <#${g.channels.register}>.`;
@@ -587,6 +596,7 @@ async function handleUserSelect(i) {
     const member = await i.guild.members.fetch(id).catch(() => null);
     if (!member) { skipped.push(`<@${id}> (not in this server)`); continue; }
     if (member.user.bot) { skipped.push(`<@${id}> (bots can't play)`); continue; }
+    if (L.isBanned(g, id)) { skipped.push(`<@${id}> (banned)`); continue; }
     const cur = L.teamOf(g, id);
     if (cur && cur.key !== key) { skipped.push(`<@${id}> (already on team ${cur.name})`); continue; }
     const created = !g.players[id];
@@ -744,6 +754,42 @@ async function handleEnd(i) {
   );
 }
 
+async function handleBan(i) {
+  const g = G(i.guild.id);
+  const sub = i.options.getSubcommand();
+  if (sub === 'list') {
+    const rows = Object.entries(g.bans).map(([id, b]) =>
+      `• <@${id}>${b.reason ? ` — ${b.reason}` : ''} (<t:${Math.floor(b.at / 1000)}:d>)`);
+    return i.reply({
+      embeds: [new EmbedBuilder().setColor(0xed4245).setTitle(`🚫 Banned players (${rows.length})`)
+        .setDescription(rows.length ? rows.join('\n').slice(0, 4000) : 'Nobody is banned.')],
+      flags: EPHEMERAL, allowedMentions: { parse: [] },
+    });
+  }
+  const user = i.options.getUser('user');
+  if (sub === 'remove') {
+    const r = L.unbanUser(g, user.id);
+    if (!r.ok) return reply(i, r.error);
+    save();
+    return i.reply({ content: `Unbanned <@${user.id}>. They can register again.`, flags: EPHEMERAL, allowedMentions: { parse: [] } });
+  }
+  // add
+  if (user.bot) return reply(i, 'Bots can\'t register anyway.');
+  if (user.id === i.user.id) return reply(i, 'You can\'t ban yourself.');
+  await i.deferReply({ flags: EPHEMERAL });
+  const before = teamSnapshot(g, user.id);
+  const r = L.banUser(g, user.id, i.options.getString('reason') || '', i.user.id);
+  if (!r.ok) return i.editReply(r.error);
+  save();
+  try {
+    const member = await i.guild.members.fetch(user.id);
+    if (g.roleId) await member.roles.remove(g.roleId);
+  } catch { /* left the server or role issue */ }
+  await updateTeamRoles(i.guild, g, user.id, before).catch(console.error);
+  await refreshDrop(i.guild).catch(() => {}); await refreshRegister(i.guild).catch(() => {});
+  return i.editReply({ content: `🚫 Banned <@${user.id}>. They're removed from their team and the roster and can't register.`, allowedMentions: { parse: [] } });
+}
+
 async function handleUnregister(i) {
   const g = G(i.guild.id);
   const user = i.options.getUser('user');
@@ -766,6 +812,7 @@ async function handleUnregister(i) {
 async function handleRegister(i) {
   const g = G(i.guild.id);
   if (!g.roleId) return reply(i, 'An admin needs to run `/setup` first.');
+  if (L.isBanned(g, i.user.id)) return reply(i, '🚫 You are banned from these scrims, so you can\'t register.');
   if (!g.open.registration) return reply(i, 'Registration is closed.');
   await i.deferReply({ flags: EPHEMERAL });
 
@@ -973,6 +1020,7 @@ async function start() {
           case 'mode': return await handleMode(i);
           case 'end': return await handleEnd(i);
           case 'unregister': return await handleUnregister(i);
+          case 'ban': return await handleBan(i);
         }
       } else if (i.isButton()) return await handleButton(i);
       else if (i.isUserSelectMenu()) return await handleUserSelect(i);

@@ -233,3 +233,23 @@ test('modes: a squad team with 3 players can still ask for one more; a full one 
   const full = mkMode('duos'); L.setTeam(full, 'a', 'F'); L.setTeam(full, 'b', 'F');
   assert.equal(L.createFill(full, 'a').ok, false);
 });
+
+test('bans: removes the player and blocks registering, teams, fills and claims', () => {
+  const g = L.ensureGuild({}, 'g'); g.roleId = 'r';
+  g.players.a = { epic: 'A', platform: '?', region: '?', team: null };
+  g.players.b = { epic: 'B', platform: '?', region: '?', team: null };
+  assert.ok(L.setTeam(g, 'a', 'Alpha').ok); assert.ok(L.setTeam(g, 'b', 'Alpha').ok);
+  assert.ok(L.banUser(g, 'a', 'cheating', 'admin').ok);
+  assert.equal(g.players.a, undefined);
+  assert.deepEqual(g.teams.alpha.members, ['b']);
+  assert.ok(L.isBanned(g, 'a'));
+  assert.equal(L.banUser(g, 'a').ok, false);
+  assert.equal(L.actorStatus(g, true, 'a'), 'banned');
+  assert.equal(L.setTeam(g, 'a', 'X').ok, false);
+  assert.equal(L.createFill(g, 'a').ok, false);
+  const f = L.createFill(g, 'b').fill;
+  assert.equal(L.joinFill(g, f, 'a').ok, false);
+  assert.ok(L.unbanUser(g, 'a').ok);
+  assert.equal(L.isBanned(g, 'a'), false);
+  assert.equal(L.unbanUser(g, 'a').ok, false);
+});
