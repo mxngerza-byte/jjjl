@@ -54,30 +54,46 @@ const teamName = (g, key) => g.teams[key]?.name || key;
 /* ------------------------------------------------------------------ */
 /*  Panels                                                            */
 /* ------------------------------------------------------------------ */
+const C = { brand: 0x7b4dff, open: 0x2ecc71, closed: 0xed4245, idle: 0x5865f2 };
+const BAR = '▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬';
+const footer = (g, extra) => ({ text: `Fortnite Scrims · ${L.modeOf(g).label}${extra ? ` · ${extra}` : ''}` });
+const gameTag = (s) => (s ? `Game ${s.current} of ${s.total}` : null);
+
 function registerPanel(g) {
   const s = g.session;
   const open = g.open.registration;
   const mode = L.modeOf(g);
+  const solos = mode.size === 1;
   const embed = new EmbedBuilder()
-    .setColor(open ? 0x7b4dff : 0x808080)
-    .setTitle(`${s ? `📝 Registration — Game ${s.current} of ${s.total}` : '📝 Player Registration'} · ${mode.label}`)
-    .setDescription(
-      !open
-        ? '🔒 **Registration is closed.**'
-        : mode.size === 1
-          ? 'Press **Register** to unlock the drop map. Your Discord name is your player name, nothing to type.\nThis event is **solos**: you play on your own.'
-          : 'Press **Register** to unlock the drop map. Your Discord name is your player name, nothing to type.\n' +
-            `${mode.label}: team captains @ their teammates right after registering (max ${mode.size} players per team).\n` +
-            'No team? Use the fill channel.',
+    .setColor(open ? C.brand : C.closed)
+    .setAuthor({ name: 'SCRIMS REGISTRATION' })
+    .setTitle(open ? '📝  Lock in your spot' : '🔒  Registration is closed')
+    .setFooter(footer(g, gameTag(s)));
+  if (!open) {
+    embed.setDescription(`${BAR}\nRegistration isn't open right now. Keep an eye on this channel, a new round gets announced with an @here.`);
+  } else {
+    embed.setDescription(
+      `${BAR}\n**One click, no forms.** Press **Register** below and your Discord name becomes your player name.\n\n` +
+      '**1️⃣  Press Register**\nYou get the **Registered Player** role.\n' +
+      (solos
+        ? '**2️⃣  Open the drop map**\nIt unlocks right away. Everyone plays solo.\n'
+        : `**2️⃣  Captains pick teammates**\nTag up to ${mode.size - 1} players and the team is created for you.\n`) +
+      `**3️⃣  Drop in**\nPick your spot on the interactive map.`,
     );
+    embed.addFields({ name: '🎮 Mode', value: mode.label, inline: true });
+    if (!solos) embed.addFields({ name: '👥 Team size', value: `Up to ${mode.size}`, inline: true });
+    if (!solos) embed.addFields({ name: '🔎 No team?', value: 'Use the fill channel', inline: true });
+  }
   if (s) {
-    embed.addFields({ name: 'Registered for this game', value: `${s.roster.length} player(s)`, inline: true });
-    embed.addFields({ name: 'Next game', value: `<t:${Math.floor(s.nextAt / 1000)}:R>`, inline: true });
+    embed.addFields(
+      { name: '✅ Registered', value: `**${s.roster.length}** player${s.roster.length === 1 ? '' : 's'}`, inline: true },
+      { name: '⏭️ Next game', value: `<t:${Math.floor(s.nextAt / 1000)}:R>`, inline: true },
+    );
   }
   return {
     embeds: [embed],
     components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('reg:open').setLabel('Register').setStyle(ButtonStyle.Primary).setDisabled(!open),
+      new ButtonBuilder().setCustomId('reg:open').setLabel('Register').setEmoji('✅').setStyle(ButtonStyle.Success).setDisabled(!open),
     )],
   };
 }
@@ -86,32 +102,68 @@ function fillPanel(g) {
   const open = g.open.fill;
   const mode = L.modeOf(g);
   const solos = mode.size === 1;
+  const live = Object.values(g.fills || {}).filter((f) => !f.closed).length;
+  const embed = new EmbedBuilder()
+    .setColor(open && !solos ? C.open : solos ? C.idle : C.closed)
+    .setAuthor({ name: 'FILL FINDER' })
+    .setTitle(!open ? '🔒  The fill channel is closed' : solos ? '🧍  Solos: nothing to fill' : `🔎  Find your ${mode.one.toLowerCase()}`)
+    .setFooter(footer(g, gameTag(g.session)));
+  if (!open) embed.setDescription(`${BAR}\nFill requests are paused. This channel opens again with the next round.`);
+  else if (solos) embed.setDescription(`${BAR}\nThis event is **solos**, so everyone plays on their own. No teammates needed.`);
+  else {
+    embed.setDescription(
+      `${BAR}\nShort on teammates? Post a request and others join with one click.\n\n` +
+      '**1️⃣  Post a request**\nAdd an optional note (platform, playstyle, etc).\n' +
+      `**2️⃣  Teammates tap Join**\nThe ${mode.one.toLowerCase()} fills up live.\n` +
+      '**3️⃣  Team formed**\nThe bot puts everyone on one team and opens a private thread.',
+    );
+    embed.addFields(
+      { name: '🎮 Mode', value: mode.label, inline: true },
+      { name: '👥 Team size', value: `${mode.size}`, inline: true },
+      { name: '📣 Open requests', value: `${live}`, inline: true },
+    );
+  }
   return {
-    embeds: [new EmbedBuilder().setColor(open ? 0x2ecc71 : 0x808080).setTitle(`🔎 Fill Finder (${mode.label.toLowerCase()})`)
-      .setDescription(!open
-        ? '🔒 **The fill channel is closed.**'
-        : solos
-          ? 'This event is **solos**, so there is nothing to fill. Everyone plays on their own.'
-          : `Need teammates? Post a request and others can join with one click. When the ${mode.one.toLowerCase()} is full, the bot puts everyone on one team and a thread is created for them.`)],
+    embeds: [embed],
     components: [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('fill:new').setLabel('Post a fill request').setStyle(ButtonStyle.Success).setDisabled(!open || solos),
+      new ButtonBuilder().setCustomId('fill:new').setLabel('Post a fill request').setEmoji('🔎').setStyle(ButtonStyle.Success).setDisabled(!open || solos),
     )],
   };
 }
 
 const linkRow = (guildId) => new ActionRowBuilder().addComponents(
-  new ButtonBuilder().setLabel('Open the interactive map').setStyle(ButtonStyle.Link).setURL(mapUrl(guildId)),
+  new ButtonBuilder().setLabel('Open the interactive map').setEmoji('🗺️').setStyle(ButtonStyle.Link).setURL(mapUrl(guildId)),
 );
 
-/** The drop-map channel holds ONE message: the link to the interactive map (no embed, no menus). */
+/** The drop-map channel holds ONE message: a single embed with the map link and a button. */
 function dropPanel(g, guildId, text) {
   const sess = g.session;
-  const title = g.open.dropmap
-    ? `🗺️ **Drop map${sess ? ` — Game ${sess.current} of ${sess.total}` : ''}**`
-    : '🔒 **The drop map is locked.**';
+  const open = g.open.dropmap;
+  const claims = Object.values(g.claims || {});
+  const taken = claims.filter((c) => c.length).length;
+  const contested = claims.filter((c) => c.length > 1).length;
+  const embed = new EmbedBuilder()
+    .setColor(open ? (contested ? 0xed4245 : C.open) : 0x4f545c)
+    .setAuthor({ name: 'DROP MAP' })
+    .setTitle(open ? `🗺️  ${sess ? `Game ${sess.current} of ${sess.total}: ` : ''}Pick your drop` : '🔒  The drop map is locked')
+    .setURL(mapUrl(guildId))
+    .setFooter(footer(g, gameTag(sess)));
+  if (!open) {
+    embed.setDescription(`${BAR}\nClaiming is locked right now. The link comes back when the drop map opens.`);
+  } else {
+    embed.setDescription(
+      `${BAR}\n${text ? `${text}\n\n` : ''}**1️⃣  Open the map** and log in with Discord\n**2️⃣  Tap a box** for your team\n**3️⃣  Press Drop here**\n\n` +
+      '⬛ **Black** = claimed   🟥 **Red** = contested',
+    );
+    embed.addFields(
+      { name: '📍 Spots taken', value: `${taken}`, inline: true },
+      { name: '⚔️ Contested', value: `${contested}`, inline: true },
+      { name: '🎮 Mode', value: L.modeOf(g).label, inline: true },
+    );
+  }
   return {
-    content: `${text || title}\n${mapUrl(guildId)}`,
-    embeds: [],                      // also clears the old embed if this edits an earlier panel
+    content: '',
+    embeds: [embed],
     components: [linkRow(guildId)],
     allowedMentions: { parse: [] },
   };
@@ -163,10 +215,15 @@ function fillEmbed(g, f) {
   const status = f.closed
     ? (f.teamName ? `✅ Team formed: ${f.teamName}` : '🔒 Closed')
     : `🔎 Looking for ${size - f.members.length} more`;
+  const filled = f.members.length >= size;
+  const bar = `${'🟩'.repeat(f.members.length)}${'⬛'.repeat(Math.max(0, size - f.members.length))}`;
   const e = new EmbedBuilder()
-    .setColor(f.closed ? (f.teamName ? 0xf5a623 : 0x808080) : 0x2ecc71)
-    .setTitle(`${L.modeOf(g).one} fill — ${status}`)
-    .addFields({ name: `Team (${f.members.length}/${size})`, value: roster.join('\n') });
+    .setColor(f.closed ? (f.teamName ? 0xf5a623 : 0x4f545c) : C.open)
+    .setAuthor({ name: `${L.modeOf(g).one.toUpperCase()} FILL REQUEST` })
+    .setTitle(status)
+    .setDescription(`${bar}  **${f.members.length}/${size}**${filled && !f.closed ? ' · full!' : ''}`)
+    .addFields({ name: '👥 Team', value: roster.join('\n') })
+    .setFooter(footer(g));
   if (f.notes) e.addFields({ name: 'Notes', value: f.notes.slice(0, 1000) });
   return e;
 }
