@@ -4,7 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const {
   Client, GatewayIntentBits, PermissionFlagsBits, ChannelType, EmbedBuilder,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, UserSelectMenuBuilder,
   ModalBuilder, TextInputBuilder, TextInputStyle, SlashCommandBuilder,
   MessageFlags, Events,
 } = require('discord.js');
@@ -442,6 +442,110 @@ async function handleHost(i, client) {
     `${s.current < s.total ? 'next registration' : 'session ends'} <t:${Math.floor(s.nextAt / 1000)}:R>`);
 }
 
+/* ------------------------------------------------------------------ */
+/*  Team roles + captain picks teammates                              */
+/* ------------------------------------------------------------------ */
+/** Snapshot of a player's team before a change: { key, roleId } or null. */
+const teamSnapshot = (g, userId) => { const t = L.teamOf(g, userId); return t ? { key: t.key, roleId: t.roleId || null } : null; };
+
+/** The team's Discord role (named after the team). Created on first use; null if the bot can't create it. */
+async function ensureTeamRole(guild, g, key) {
+  const t = g.teams[key];
+  if (!t) return null;
+  let role = t.roleId && guild.roles.cache.get(t.roleId);
+  if (!role) {
+    try {
+      role = await guild.roles.create({ name: t.name, permissions: [], mentionable: false, reason: 'Scrims team role' });
+      t.roleId = role.id;
+      save();
+    } catch { return null; }
+  }
+  return role;
+}
+
+/** After a player's team changed: drop the old team's role (deleting it if the team is gone), add the new one. */
+async function updateTeamRoles(guild, g, userId, before) {
+  const member = await guild.members.fetch(userId).catch(() => null);
+  const now = L.teamOf(g, userId);
+  if (before && before.roleId && (!now || now.key !== before.key)) {
+    if (member) await member.roles.remove(before.roleId, 'Left the team').catch(() => {});
+    if (!g.teams[before.key]) await guild.roles.delete(before.roleId, 'Team no longer exists').catch(() => {});
+  }
+  const roleId = now && g.teams[now.key] && g.teams[now.key].roleId;
+  if (member && roleId && (!before || !now || before.key !== now.key)) await member.roles.add(roleId, 'Joined the team').catch(() => {});
+}
+
+/** Deletes every team role (used when teams are wiped by /end scrims or /mode). */
+async function deleteAllTeamRoles(guild, g, reason) {
+  for (const t of Object.values(g.teams)) {
+    if (t.roleId) await guild.roles.delete(t.roleId, reason).catch(() => {});
+  }
+}
+
+/** After a captain registers: how many more teammates can he pick? null = don't ask (solos, not the captain, team full). */
+function captainPrompt(g, userId) {
+  const size = L.teamSize(g);
+  const team = L.teamOf(g, userId);
+  if (size < 2 || !team || team.members[0] !== userId) return null;
+  const remaining = size - team.members.length;
+  return remaining > 0 ? { key: team.key, name: team.name, remaining } : null;
+}
+
+const pickRow = (p) => new ActionRowBuilder().addComponents(
+  new UserSelectMenuBuilder().setCustomId(`team:pick:${p.key}`).setPlaceholder('@ your teammates')
+    .setMinValues(1).setMaxValues(Math.min(p.remaining, 25)),
+);
+
+async function handleUserSelect(i) {
+  if (!i.customId.startsWith('team:pick:')) return;
+  const g = G(i.guild.id);
+  const key = i.customId.slice('team:pick:'.length);
+  const team = g.teams[key];
+  if (!team || team.members[0] !== i.user.id) {
+    return i.update({ content: 'This team has changed, so that menu is out of date. Register again to pick teammates.', components: [] });
+  }
+  if (!g.open.registration) return i.update({ content: 'Registration is closed.', components: [] });
+  await i.deferUpdate();
+
+  const added = []; const skipped = [];
+  for (const id of i.values) {
+    if (id === i.user.id) continue;
+    const member = await i.guild.members.fetch(id).catch(() => null);
+    if (!member) { skipped.push(`<@${id}> (not in this server)`); continue; }
+    if (member.user.bot) { skipped.push(`<@${id}> (bots can't play)`); continue; }
+    const cur = L.teamOf(g, id);
+    if (cur && cur.key !== key) { skipped.push(`<@${id}> (already on team ${cur.name})`); continue; }
+    const created = !g.players[id];
+    if (created) g.players[id] = { epic: member.displayName.slice(0, 32), platform: '?', region: '?', team: null };
+    const r = L.setTeam(g, id, team.name);
+    if (!r.ok) { if (created) delete g.players[id]; skipped.push(`<@${id}> (team is full)`); continue; }
+    L.addToRoster(g, id);
+    added.push(member);
+  }
+  save();
+
+  // roles: Registered for the new teammates, the team-name role for the whole team
+  const role = await ensureTeamRole(i.guild, g, key);
+  let roleFail = 0;
+  for (const m of added) await m.roles.add(g.roleId, 'Added by their team captain').catch(() => { roleFail++; });
+  if (role) {
+    for (const uid of g.teams[key].members) {
+      const m = uid === i.user.id ? i.member : await i.guild.members.fetch(uid).catch(() => null);
+      if (m) await m.roles.add(role, 'Team role').catch(() => { roleFail++; });
+    }
+  }
+
+  const now = g.teams[key];
+  const lines = [`**${now.name}** is now ${now.members.length}/${L.teamSize(g)}.`];
+  if (added.length) lines.push(`Added: ${added.map((m) => `<@${m.id}>`).join(' ')}. They got the Registered role${role ? ` and <@&${role.id}>` : ''}.`);
+  if (!role) lines.push('⚠️ I couldn\'t create the team role. Check that I have **Manage Roles**.');
+  if (roleFail) lines.push(`⚠️ I couldn't give ${roleFail} role(s). Move my bot role **above** the registered and team roles.`);
+  if (skipped.length) lines.push(`Skipped: ${skipped.join(', ')}.`);
+  if (added.length) lines.push('They can press **Register** to add their Epic name, platform and region.');
+  await i.editReply({ content: lines.join('\n'), components: [], allowedMentions: { parse: [] } });
+  refreshRegister(i.guild).catch(() => {});
+}
+
 async function handleTeam(i) {
   const g = G(i.guild.id);
   const sub = i.options.getSubcommand();
@@ -451,15 +555,19 @@ async function handleTeam(i) {
     return reply(i, 'This event is **solos**, so you play on your own and there are no teams to manage.');
   }
   if (sub === 'set') {
+    const before = teamSnapshot(g, i.user.id);
     const r = L.setTeam(g, i.user.id, i.options.getString('name'));
     if (!r.ok) return reply(i, r.error);
     save();
+    updateTeamRoles(i.guild, g, i.user.id, before).catch(console.error);
     scheduleDropRefresh(i.guild);
     return reply(i, `You're on team **${r.team.name}** (${r.team.members.length}/${L.teamSize(g)}).`);
   }
   if (sub === 'leave') {
+    const before = teamSnapshot(g, i.user.id);
     if (!L.leaveTeam(g, i.user.id)) return reply(i, 'You\'re not on a team.');
     save();
+    updateTeamRoles(i.guild, g, i.user.id, before).catch(console.error);
     scheduleDropRefresh(i.guild);
     return reply(i, 'You left your team.');
   }
@@ -491,6 +599,7 @@ async function handleMode(i) {
   if (type === g.mode) return reply(i, `Already running **${L.modeOf(g).label}**. Nothing changed.`);
   await i.deferReply({ flags: EPHEMERAL });
   await closeAllFills(i.guild);               // open fill requests no longer fit the new team size
+  await deleteAllTeamRoles(i.guild, g, 'Event mode changed');
   const r = L.setMode(g, type);
   if (!r.ok) return i.editReply(r.error);
   save();
@@ -535,6 +644,7 @@ async function handleEnd(i) {
 
   // 3) reset the event. Anyone whose role could not be removed stays on record so /end scrims can be run again.
   const keep = Object.fromEntries(failed.filter((id) => g.players[id]).map((id) => [id, { ...g.players[id], team: null }]));
+  await deleteAllTeamRoles(guild, g, 'Scrims ended');
   g.players = keep; g.teams = {}; g.claims = {}; g.fills = {};
   save();
 
@@ -558,6 +668,7 @@ async function handleEnd(i) {
 async function handleUnregister(i) {
   const g = G(i.guild.id);
   const user = i.options.getUser('user');
+  const before = teamSnapshot(g, user.id);
   L.leaveTeam(g, user.id);
   delete g.players[user.id];
   if (g.session) g.session.roster = g.session.roster.filter((u) => u !== user.id);
@@ -567,6 +678,7 @@ async function handleUnregister(i) {
     if (g.roleId) await member.roles.remove(g.roleId);
   } catch { /* left the server or role issue */ }
   await i.deferReply({ flags: EPHEMERAL });
+  await updateTeamRoles(i.guild, g, user.id, before);
   await refreshDrop(i.guild); await refreshRegister(i.guild);
   return i.editReply(`Unregistered <@${user.id}>.`);
 }
@@ -703,6 +815,7 @@ async function handleModal(i) {
     try { team = i.fields.getTextInputValue('team').trim(); } catch { /* solos: the form has no team field */ }
     if (!epic) return reply(i, 'Epic username can\'t be empty.');
     g.players[i.user.id] = { ...(g.players[i.user.id] || { team: null }), epic, platform, region };
+    const teamBefore = teamSnapshot(g, i.user.id);
     let teamNote = '';
     if (L.teamSize(g) === 1) {
       const r = L.soloTeam(g, i.user.id);
@@ -721,11 +834,17 @@ async function handleModal(i) {
     } catch {
       return i.editReply('I saved your details but couldn\'t give you the role. Ask an admin to move my bot role above the registered role.');
     }
+    await updateTeamRoles(i.guild, g, i.user.id, teamBefore);
     refreshRegister(i.guild).catch(() => {});
-    return i.editReply(
-      `You're registered as **${epic}**${g.session ? ` for Game ${g.session.current}/${g.session.total}` : ''}.${teamNote}\n` +
-      `You can now see <#${g.channels.drop}> and <#${g.channels.fill}>. Interactive map: ${mapUrl(i.guild.id)}`,
-    );
+    const prompt = captainPrompt(g, i.user.id);
+    return i.editReply({
+      content:
+        `You're registered as **${epic}**${g.session ? ` for Game ${g.session.current}/${g.session.total}` : ''}.${teamNote}\n` +
+        `You can now see <#${g.channels.drop}> and <#${g.channels.fill}>. Interactive map: ${mapUrl(i.guild.id)}` +
+        (prompt ? `\n\n**Team captain:** @ up to ${prompt.remaining} teammate${prompt.remaining === 1 ? '' : 's'} below. ` +
+          `They'll get the Registered role and a **${prompt.name}** role.` : ''),
+      components: prompt ? [pickRow(prompt)] : [],
+    });
   }
 
   if (i.customId === 'fill:modal') {
@@ -791,6 +910,7 @@ async function start() {
           case 'unregister': return await handleUnregister(i);
         }
       } else if (i.isButton()) return await handleButton(i);
+      else if (i.isUserSelectMenu()) return await handleUserSelect(i);
       else if (i.isStringSelectMenu()) return await handleSelect(i);
       else if (i.isModalSubmit()) return await handleModal(i);
     } catch (err) {
